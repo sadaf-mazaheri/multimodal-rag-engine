@@ -88,6 +88,30 @@ class TestNormalizeText:
         assert normalize_text(None) == ""
         assert normalize_text("   ") == ""
 
+    def test_strips_nul_and_control_characters(self):
+        """A single NUL fails an entire PostgreSQL write; both appear in the corpus."""
+        assert normalize_text("ab\x00cd\x01ef") == "abcdef"
+
+    def test_tabs_and_newlines_are_whitespace_not_damage(self):
+        """Tab and newline survive control stripping.
+
+        Tab is then collapsed to a space by the ordinary whitespace rule, which
+        is what we want for retrieval text; the point is that it is treated as
+        layout rather than deleted the way U+0000 is.
+        """
+        assert normalize_text("a\tb\nc") == "a b\nc"
+
+    def test_normalises_crlf_before_stripping_controls(self):
+        """\\r must become a newline, not vanish and join two lines into one."""
+        assert normalize_text("line one\r\nline two\rline three") == (
+            "line one\nline two\nline three"
+        )
+
+    def test_output_is_safe_for_a_postgres_text_column(self):
+        raw = "Retrieval\x00Augmented\x01Generation\x0bTest"
+        cleaned = normalize_text(raw)
+        assert not any(ord(c) < 32 and c not in "\t\n" for c in cleaned)
+
 
 class TestTextQuality:
     def test_counts_unmappable_glyphs(self):

@@ -301,6 +301,20 @@ def ingest_run(
     failed = [r for r in results if not r.ok]
     for r in failed:
         console.print(f"[red]{r.doc_id}:[/] {r.message}")
+
+    # A per-document Postgres failure is not fatal -- the sidecar is still
+    # written -- but it must not be reportable only as a quiet "no" in a table
+    # column, which is exactly how a NUL-byte write failure went unnoticed.
+    if store is not None:
+        not_stored = [r.doc_id for r in results if r.ok and not r.stored_in_postgres]
+        if not_stored:
+            console.print(
+                f"[yellow]Warning:[/] {len(not_stored)} document(s) parsed but not written to "
+                f"Postgres: {', '.join(not_stored)}\n"
+                "  Their JSON sidecars are up to date; re-run once the cause is fixed. "
+                "Run with --log-level DEBUG to see the database error."
+            )
+
     if failed:
         raise typer.Exit(code=1)
 

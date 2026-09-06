@@ -53,10 +53,28 @@ def store():
         yield connected
 
 
+TEST_DOC_PREFIX = "test-"
+
+
 @pytest.fixture
 def doc_id() -> str:
     """A unique id so a test run cannot collide with the real corpus."""
-    return f"test-{uuid.uuid4().hex[:12]}"
+    return f"{TEST_DOC_PREFIX}{uuid.uuid4().hex[:12]}"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _sweep_test_documents(store):
+    """Remove every test document at the end of the module.
+
+    Per-test teardown already deletes on the happy path, but a test that fails
+    part-way through an insert leaves its rows behind -- and those rows then show
+    up in `mmrag ingest status` alongside the real corpus and skew the Step 6
+    report. A prefix sweep makes pollution self-correcting rather than something
+    to notice later and clean up by hand.
+    """
+    yield
+    with store.transaction():
+        store.conn.execute("DELETE FROM documents WHERE doc_id LIKE %s", (f"{TEST_DOC_PREFIX}%",))
 
 
 @pytest.fixture
@@ -348,6 +366,60 @@ class TestConstraintsAreEnforced:
         assert store.get_elements(doc_id) == []
 
 
+class TestDurability:
+    """Writes must survive the connection that made them.
+
+    Regression test for a silent data-loss bug: with psycopg's default
+    autocommit=False, reading before writing opened an implicit transaction, so
+    `with store.transaction()` nested as a savepoint and never committed. The
+    writing connection still saw its own rows, so everything looked fine until a
+    *different* connection looked.
+    """
+
+    def test_write_after_read_is_visible_to_another_connection(self, store, records, doc_id):
+        from mmrag.stores.postgres import PostgresStore
+
+        document, pages, elements = records
+
+        # The read is the whole point: it is what used to open the implicit
+        # transaction that swallowed the subsequent write.
+        store.get_document(doc_id)
+
+        with store.transaction():
+            store.upsert_document(document)
+            store.insert_pages(pages)
+            store.insert_elements(elements)
+
+        with PostgresStore() as other:
+            assert other.get_document(doc_id) is not None, "write was rolled back on close"
+            assert len(other.get_elements(doc_id)) == len(elements)
+
+        with store.transaction():
+            store.delete_document(doc_id)
+        with PostgresStore() as other:
+            assert other.get_document(doc_id) is None, "delete was rolled back on close"
+
+    def test_a_failed_transaction_rolls_back_fully(self, store, records, doc_id):
+        """A partial write must not survive: no half-ingested documents."""
+        import psycopg
+
+        from mmrag.stores.postgres import PostgresStore
+
+        document, pages, _ = records
+        with pytest.raises(psycopg.Error), store.transaction():
+            store.upsert_document(document)
+            store.insert_pages(pages)
+            # Violates the page_number >= 1 CHECK, aborting the transaction.
+            store.conn.execute(
+                "INSERT INTO elements (element_id, doc_id, page_id, page_number, element_type) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (f"{doc_id}#bad", doc_id, make_page_id(doc_id, 1), 0, "text"),
+            )
+
+        with PostgresStore() as other:
+            assert other.get_document(doc_id) is None, "partial write survived a failed transaction"
+
+
 class TestReingestionConverges:
     def test_reingesting_replaces_rather_than_accumulates(self, store, records, doc_id):
         """A re-run after a parser fix must converge, not duplicate."""
@@ -367,12 +439,62 @@ class TestReingestionConverges:
 
 
 class TestCorpusStats:
+    """Counts must be per-document row counts, never a joined product.
+
+    The fixture deliberately stores more than one page *and* more than one
+    element. With a single page of either, a cartesian fan-out between the two
+    one-to-many tables multiplies by 1 and is invisible.
+    """
+
+    def test_fixture_can_actually_detect_fan_out(self, stored):
+        _, pages, elements = stored
+        assert len(pages) > 1 and len(elements) > 1, (
+            "with one page or one element, a fan-out bug multiplies by 1 and hides"
+        )
+
     def test_stats_report_the_stored_document(self, store, stored, doc_id):
+        _, pages, elements = stored
         rows = {r["doc_id"]: r for r in store.corpus_stats()}
         assert doc_id in rows
         row = rows[doc_id]
-        assert row["pages_stored"] == 2
-        assert row["elements"] == 3
-        assert row["tables"] == 1
-        assert row["figures"] == 1
-        assert row["captioned"] == 2
+
+        expected = {
+            "pages_stored": len(pages),
+            "elements": len(elements),
+            "tables": sum(1 for e in elements if e.element_type is ElementType.TABLE),
+            "figures": sum(1 for e in elements if e.element_type.is_visual),
+            "captioned": sum(1 for e in elements if e.caption),
+        }
+        # Compared as a whole rather than one assert at a time: the fan-out bug
+        # inflated *every* count, but a sequence of asserts stops at the first
+        # and makes a systematic error look like a single off-by-N.
+        actual = {key: row[key] for key in expected}
+        assert actual == expected
+
+    def test_counts_are_not_multiplied_by_the_page_count(self, store, stored, doc_id):
+        """Names the failure mode directly, so a regression says what broke."""
+        _, pages, elements = stored
+        row = {r["doc_id"]: r for r in store.corpus_stats()}[doc_id]
+        assert row["elements"] != len(elements) * len(pages), (
+            "elements count equals elements x pages: the aggregate has fanned out again"
+        )
+
+    def test_mean_confidence_reflects_the_stored_elements(self, store, stored, doc_id):
+        _, _, elements = stored
+        row = {r["doc_id"]: r for r in store.corpus_stats()}[doc_id]
+        expected = sum(e.extraction_confidence for e in elements) / len(elements)
+        assert float(row["mean_confidence"]) == pytest.approx(expected, abs=1e-3)
+
+    def test_a_document_with_no_elements_reports_zero_not_null(self, store, records, doc_id):
+        """LEFT JOIN + COALESCE: an un-parsed document must not render as None."""
+        document, _, _ = records
+        with store.transaction():
+            store.delete_document(doc_id)
+            store.upsert_document(document)
+
+        row = {r["doc_id"]: r for r in store.corpus_stats()}[doc_id]
+        assert (row["pages_stored"], row["elements"], row["tables"]) == (0, 0, 0)
+        assert row["figures"] == 0 and row["captioned"] == 0
+
+        with store.transaction():
+            store.delete_document(doc_id)

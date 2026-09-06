@@ -58,7 +58,22 @@ class PostgresStore:
 
     def __enter__(self) -> PostgresStore:
         self._conn = psycopg.connect(
-            self.dsn, row_factory=dict_row, connect_timeout=self.connect_timeout
+            self.dsn,
+            row_factory=dict_row,
+            connect_timeout=self.connect_timeout,
+            # autocommit=True is a correctness requirement here, not a
+            # preference. With psycopg's default (autocommit=False) the first
+            # statement of any kind opens an implicit transaction; a later
+            # `with conn.transaction()` then nests inside it as a SAVEPOINT, so
+            # leaving that block only releases the savepoint and never commits.
+            # The outer transaction stays open and is rolled back by close() --
+            # silently discarding the write. Any read-before-write sequence hits
+            # this, and it looks like success: the same connection can still see
+            # its own uncommitted rows.
+            #
+            # With autocommit, `transaction()` is always a real top-level
+            # transaction that commits on exit and rolls back on error.
+            autocommit=True,
         )
         return self
 
@@ -289,23 +304,48 @@ class PostgresStore:
             return [_to_element(r) for r in cur.fetchall()]
 
     def corpus_stats(self) -> list[dict[str, Any]]:
-        """Per-document counts, for `mmrag ingest status` and the report."""
+        """Per-document counts, for ``mmrag ingest status`` and the Step 6 report.
+
+        Every count is the number of *rows stored for that document*: ``elements``
+        is the element count, not the count of some joined product.
+
+        Pages and elements are aggregated in separate subqueries and only then
+        joined to ``documents``. Joining both one-to-many tables at the same
+        level instead produces a cartesian product -- each element row repeated
+        once per page -- which silently multiplies every count by the page
+        count. That was the original bug here, and it was easy to miss because
+        ``pages_stored`` used ``count(DISTINCT ...)`` and so stayed correct,
+        while ``avg()`` is unchanged by uniform duplication and so did too. Only
+        the plain counts were wrong, and only in a way that looks plausible.
+        """
         with self.conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT d.doc_id, d.title, d.doc_type, d.domain,
                        d.n_pages, d.n_pages_ingested,
-                       count(DISTINCT p.page_id) AS pages_stored,
-                       count(e.element_id)       AS elements,
-                       count(*) FILTER (WHERE e.element_type = 'table')   AS tables,
-                       count(*) FILTER (WHERE e.element_type IN
-                             ('figure', 'chart', 'diagram'))              AS figures,
-                       count(*) FILTER (WHERE e.caption IS NOT NULL)      AS captioned,
-                       round(avg(e.extraction_confidence)::numeric, 3)    AS mean_confidence
+                       COALESCE(p.pages_stored, 0) AS pages_stored,
+                       COALESCE(e.elements, 0)     AS elements,
+                       COALESCE(e.tables, 0)       AS tables,
+                       COALESCE(e.figures, 0)      AS figures,
+                       COALESCE(e.captioned, 0)    AS captioned,
+                       e.mean_confidence
                 FROM documents d
-                LEFT JOIN pages p    ON p.doc_id = d.doc_id
-                LEFT JOIN elements e ON e.doc_id = d.doc_id
-                GROUP BY d.doc_id, d.title, d.doc_type, d.domain, d.n_pages, d.n_pages_ingested
+                LEFT JOIN (
+                    SELECT doc_id, count(*) AS pages_stored
+                    FROM pages
+                    GROUP BY doc_id
+                ) p ON p.doc_id = d.doc_id
+                LEFT JOIN (
+                    SELECT doc_id,
+                           count(*)                                          AS elements,
+                           count(*) FILTER (WHERE element_type = 'table')    AS tables,
+                           count(*) FILTER (WHERE element_type IN
+                                 ('figure', 'chart', 'diagram'))             AS figures,
+                           count(*) FILTER (WHERE caption IS NOT NULL)       AS captioned,
+                           round(avg(extraction_confidence)::numeric, 3)     AS mean_confidence
+                    FROM elements
+                    GROUP BY doc_id
+                ) e ON e.doc_id = d.doc_id
                 ORDER BY d.doc_id
                 """
             )

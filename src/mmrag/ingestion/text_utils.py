@@ -67,6 +67,20 @@ _MULTI_SPACE = re.compile(r"[ \t]+")
 _MULTI_NEWLINE = re.compile(r"\n{3,}")
 _TRAILING_WS = re.compile(r"[ \t]+\n")
 
+# C0 control characters and DEL, excluding tab and newline which are real
+# layout. PDFs with a broken font map emit these as the extraction of an
+# unmapped glyph -- U+0000 and U+0001 both appear in the corpus.
+#
+# Stripping them is not cosmetic: a PostgreSQL `text` column cannot hold a NUL
+# byte at all, so a single one anywhere in a document fails the entire write
+# with "PostgreSQL text fields cannot contain NUL (0x00) bytes". Doing it here
+# rather than in the store keeps every consumer safe -- Qdrant payloads and the
+# JSON sidecars included -- instead of fixing one backend at a time.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# Normalise line endings before anything else measures or joins lines.
+_CRLF = re.compile(r"\r\n?")
+
 REPLACEMENT_CHAR = chr(0xFFFD)  # U+FFFD REPLACEMENT CHARACTER: an unmappable glyph
 
 
@@ -83,6 +97,11 @@ def normalize_text(text: str | None, *, join_hyphens: bool = True) -> str:
     # NFKC first: folds full-width forms and many compatibility characters.
     out = unicodedata.normalize("NFKC", text)
     out = out.translate(_TRANSLATION)
+
+    # Before any line-based work, so \r\n does not survive as a stray \r and
+    # then get stripped as a control character, silently joining two lines.
+    out = _CRLF.sub("\n", out)
+    out = _CONTROL_CHARS.sub("", out)
 
     if join_hyphens:
         out = _HYPHEN_BREAK.sub(r"\1\2", out)
