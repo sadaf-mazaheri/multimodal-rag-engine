@@ -30,7 +30,7 @@ This project is being built in stages. Current state:
 - [x] **Step 0** — Repo scaffold, configuration system, core data model, Docker infra
 - [x] **Step 1** — Pinned corpus manifest/lockfile + verifying downloader
 - [x] **Step 2** — Shared ingestion: PDF → elements with rich metadata and provenance
-- [ ] **Step 3** — Method 1: Textified hybrid RAG
+- [x] **Step 3** — Method 1: Textified hybrid RAG
 - [ ] **Step 4** — Method 2: Modality-aware retrieval + query router
 - [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2)
 - [ ] **Step 6** — Evaluation harness and comparison report
@@ -93,6 +93,14 @@ docker compose up -d
 Postgres (metadata, on port **5433** by default to avoid clashing with a system
 Postgres) and Qdrant (vectors, on 6333). The schema in `scripts/sql/` is applied
 automatically on first start.
+
+> **Changing the pinned Qdrant version requires wiping its volume.** Qdrant
+> storage is not forward-compatible: a newer server panics on segments written
+> by an older one and then restart-loops. The vectors are derived data, so
+> rebuild rather than migrate — `docker compose stop qdrant && docker volume rm
+> rag_project_qdrant_data`, then `mmrag index build`. Only the Qdrant volume;
+> Postgres holds the parsed corpus. The client is pinned in lockstep in
+> `pyproject.toml`.
 
 ### 4. Check your environment
 
@@ -250,6 +258,85 @@ regression test:
 
 ---
 
+## Method 1 — Textified RAG
+
+Every modality is flattened into text, then retrieved by one hybrid pipeline.
+The simplest thing that could work — which is the point. It is the baseline the
+other two are measured against, so the number it exists to produce is the *cost
+of the flattening*.
+
+```bash
+mmrag index build --config method1
+mmrag query "What is the Transformer architecture?" --retrieve-only
+mmrag query "How many cases were confirmed?" --provider echo   # free, no API key
+mmrag query "What was Berkshire's insurance underwriting result?"
+```
+
+**Pipeline:** elements → `best_text()` flattening → page-bounded chunking →
+BM25 + dense, fused with weighted RRF → prompt with numbered sources → cited
+answer whose citations resolve back to a page and bounding box.
+
+### What the baseline can't see
+
+Building the index over the full corpus produces **2,818 chunks** (2,202 text,
+363 table, 253 figure) from 954 pages — and reports the headline measurement:
+
+> **147 figures have no retrievable text at all.**
+
+Those are charts and diagrams where nothing textual was ever extracted — no
+caption, no OCR, no VLM description. They exist in the corpus and are
+*structurally unreachable* for this architecture. That number is the mechanism
+behind any deficit Method 3 later makes up, and it is why `FlattenReport` counts
+and attributes losses instead of silently dropping them.
+
+### Design decisions
+
+**Rank fusion, not score fusion.** BM25 scores are unbounded and
+corpus-dependent; cosine similarities sit in [-1, 1]. Combining them by score
+requires a normalisation choice, and every such choice is a hidden tunable. RRF
+uses only ordering, so there is nothing to tune away. Per-retriever ranks are
+kept on every result, which makes the ablation ("was the hybrid actually better
+than either alone?") answerable *after* the run rather than requiring three.
+
+**The two retrievers fail differently, which is why both are there.** Dense
+retrieval handles paraphrase and misses rare literals; BM25 does the reverse. A
+document corpus asks for `GPIO_OE`, `Figure 12`, and `$22,360` — BM25's
+strength — as often as it asks conceptual questions.
+
+**Chunks never cross a page.** A chunk spanning two pages cannot be cited to one
+page, so `Chunk` rejects it at construction. Tables and figures are always their
+own chunks; a table merged into prose is neither good prose nor a usable table.
+
+**One deliberate exception to "metadata stays structured".** With
+`prepend_context_header`, a chunk's text is prefixed with
+`Document > Section > Subsection`. A chunk from mid-document is often
+unintelligible alone ("It rose to 4.2% in the third quarter" — what did, in
+which report?), and the breadcrumb restores the referent the page layout
+supplied visually. It is capped at a heading-sized string, recorded separately
+in `metadata["context_header"]` so it can be stripped, and switchable off for
+the ablation. Identifiers, bounding boxes, extraction methods and confidences
+never enter embedded text.
+
+**Refusal is a valid answer.** The model is instructed to emit
+`INSUFFICIENT_EVIDENCE` rather than guess. A benchmark that rewards confident
+guessing cannot separate "retrieval failed" from "generation hallucinated over
+good evidence" — which is exactly the distinction Step 6 needs.
+
+**Citations that don't resolve are counted, not passed through.** A model citing
+`[7]` when five sources were supplied is a grounding failure; silently dropping
+it would hide the problem behind a clean-looking answer.
+
+### Generation is the only vendor-dependent step
+
+Everything else — parsing, chunking, embedding, BM25, fusion, reranking,
+evaluation — is local and open-source, so retrieval quality can never be
+confounded with a model vendor's behaviour. Providers: `openai` (default,
+gpt-4o-mini), `local` (any OpenAI-compatible server), and `echo`, a deterministic
+stub that returns valid citation markers so the whole pipeline can be exercised
+and tested for free.
+
+---
+
 ## Repository layout
 
 ```
@@ -267,12 +354,16 @@ src/mmrag/
     figures.py        raster + vector figure detection, caption matching
     classify.py       figure/table type and confidence heuristics
     metadata.py       document metadata merge (manifest > PDF > heuristic)
-  textify/          modality → text flattening              (Step 3)
+  textify/          modality → text flattening + chunking
+    flatten.py        what to index, and what the flattening lost
+    chunker.py        elements → retrieval units, provenance preserved
+    tokens.py         token counting + sentence segmentation
   embeddings/       local text / image / visual embedders
   stores/           Postgres + Qdrant + BM25 index adapters
-  retrieval/        retrievers, RRF fusion, reranking, query router
+  retrieval/        hybrid retriever, RRF fusion, cross-encoder reranking
   generation/       provider interface (openai | local | echo) + answerer
   methods/          the three end-to-end pipelines
+    method1_textified.py
   evaluation/       metrics, gold set, comparison report    (Step 6)
 notebooks/          Colab GPU notebook for Method 3 visual indexing
 ```

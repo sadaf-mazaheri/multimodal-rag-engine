@@ -30,7 +30,22 @@ services:
       retries: 10
 
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    # Pinned to match the qdrant-client range in pyproject.toml. The client
+    # refuses to guarantee compatibility across a major/minor gap, and a
+    # mismatch surfaces only as a warning -- easy to ignore until a payload
+    # or query API changes shape underneath the code.
+    #
+    # Changing this tag requires wiping the volume: Qdrant storage is NOT
+    # forward-compatible, and a newer server panics on a segment written by an
+    # older one ("unknown variant `on_disk`") and then restart-loops. The
+    # vectors are derived data, so rebuild rather than migrate:
+    #
+    #   docker compose stop qdrant && docker compose rm -f qdrant
+    #   docker volume rm rag_project_qdrant_data
+    #   docker compose up -d qdrant && mmrag index build --config method1
+    #
+    # Only the qdrant volume -- postgres holds the parsed corpus.
+    image: qdrant/qdrant:v1.19.0
     container_name: mmrag-qdrant
     restart: unless-stopped
     ports:

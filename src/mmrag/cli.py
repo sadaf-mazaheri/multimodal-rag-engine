@@ -31,9 +31,11 @@ ingest_app = typer.Typer(
     help="Parse the corpus into the shared Document/Page/Element representation.",
     no_args_is_help=True,
 )
+index_app = typer.Typer(help="Build and inspect retrieval indexes.", no_args_is_help=True)
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(config_app, name="config")
 app.add_typer(ingest_app, name="ingest")
+app.add_typer(index_app, name="index")
 
 console = Console()
 
@@ -434,6 +436,192 @@ def ingest_status() -> None:
     console.print(
         f"[bold]Total:[/] {sum(r['elements'] for r in rows)} elements across {len(rows)} documents"
     )
+
+
+# ---------------------------------------------------------------------------
+# index
+# ---------------------------------------------------------------------------
+
+
+def _load_method(config_name: str) -> Any:
+    from mmrag.config import load_experiment_config
+    from mmrag.methods import Method1Textified
+
+    cfg = load_experiment_config(config_name)
+    if cfg.method != "method1":
+        raise typer.BadParameter(
+            f"config '{config_name}' selects {cfg.method}, which is not implemented yet"
+        )
+    return cfg, Method1Textified(cfg)
+
+
+@index_app.command("build")
+def index_build(
+    config_name: str = typer.Option("method1", "--config", "-c"),
+    doc_id: list[str] = typer.Option(None, "--doc-id", "-d", help="Restrict to these documents"),
+) -> None:
+    """Chunk the parsed corpus and build the BM25 + dense indexes."""
+    _, method = _load_method(config_name)
+    report = method.build_index(doc_ids=list(doc_id) if doc_id else None)
+
+    console.print(
+        f"[green]Built '{report.variant}' index[/] in {report.elapsed_s:.1f}s: "
+        f"{report.n_chunks} chunks from {report.n_documents} documents"
+    )
+
+    table = Table(title="Chunks by type")
+    table.add_column("type", style="cyan")
+    table.add_column("count", justify="right")
+    for chunk_type, count in sorted(report.by_type.items()):
+        table.add_row(chunk_type, str(count))
+    console.print(table)
+
+    console.print(
+        f"[yellow]{report.invisible_figures}[/] figures had no retrievable text at all "
+        "and are invisible to this method."
+    )
+    console.print(f"[dim]embedder: {report.embedder}[/]")
+
+
+@index_app.command("status")
+def index_status(
+    config_name: str = typer.Option("method1", "--config", "-c"),
+) -> None:
+    """Show what a built index contains."""
+    import json
+
+    from mmrag.methods.method1_textified import MANIFEST_FILE
+
+    _, method = _load_method(config_name)
+    manifest = method.index_dir / MANIFEST_FILE
+    if not manifest.exists():
+        console.print(f"[red]No index at {method.index_dir}.[/] Run 'mmrag index build'.")
+        raise typer.Exit(code=1)
+
+    report = json.loads(manifest.read_text(encoding="utf-8"))["report"]
+    console.print(
+        f"[bold]{report['variant']}[/]: {report['n_chunks']} chunks from "
+        f"{report['n_documents']} documents, built in {report['elapsed_s']}s"
+    )
+    console.print(f"  by type: {report['by_type']}")
+    console.print(f"  figures with no text: {report['invisible_figures']}")
+    console.print(f"  embedder: {report['embedder']}")
+
+    try:
+        from mmrag.stores.qdrant import QdrantStore
+
+        console.print(f"  qdrant: {QdrantStore(report['variant']).describe()}")
+    except Exception as exc:
+        console.print(f"  [yellow]qdrant unavailable: {exc}[/]")
+
+
+# ---------------------------------------------------------------------------
+# query
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def query(
+    text: str = typer.Argument(..., help="The question to ask"),
+    config_name: str = typer.Option("method1", "--config", "-c"),
+    top_k: int | None = typer.Option(None, "--top-k", "-k"),
+    doc_id: list[str] = typer.Option(None, "--doc-id", "-d", help="Restrict to these documents"),
+    provider_name: str | None = typer.Option(
+        None, "--provider", help="openai | local | echo (overrides .env)"
+    ),
+    retrieve_only: bool = typer.Option(
+        False, "--retrieve-only", help="Show retrieved chunks without calling a model"
+    ),
+    show_text: bool = typer.Option(False, "--show-text", help="Print each chunk's full text"),
+) -> None:
+    """Ask a question against a built index."""
+    _, method = _load_method(config_name)
+    ids = list(doc_id) if doc_id else None
+
+    if retrieve_only:
+        result = method.retrieve(text, top_k=top_k, doc_ids=ids)
+        _print_retrieval(result, show_text=show_text)
+        return
+
+    from mmrag.generation.providers import ProviderError, get_provider
+
+    try:
+        provider = get_provider(name=provider_name)
+    except ProviderError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    answer = method.answer(text, provider, top_k=top_k, doc_ids=ids)
+
+    console.print(f"\n[bold cyan]{answer.query}[/]\n")
+    console.print(answer.text)
+
+    if answer.citations:
+        table = Table(title="Citations", show_lines=False)
+        table.add_column("#", justify="right", width=3)
+        table.add_column("document", style="cyan", no_wrap=True, width=26)
+        table.add_column("page", justify="right", width=4)
+        table.add_column("section", no_wrap=True, width=18)
+        table.add_column("snippet", overflow="ellipsis", no_wrap=True, max_width=46)
+        for n, citation in enumerate(answer.citations, start=1):
+            table.add_row(
+                str(n),
+                citation.doc_title,
+                str(citation.page_number),
+                citation.section or "-",
+                citation.snippet or "",
+            )
+        console.print(table)
+    else:
+        console.print("[yellow]The answer carried no resolvable citations.[/]")
+
+    console.print(
+        f"[dim]provider={answer.metadata.get('provider')} "
+        f"model={answer.metadata.get('model')} "
+        f"sources={answer.metadata.get('n_sources')} "
+        f"tokens={answer.usage.get('total_tokens', 0)} "
+        f"retrieval={answer.latency_ms.get('total_ms', 0):.0f}ms "
+        f"generation={answer.latency_ms.get('generation_ms', 0):.0f}ms[/]"
+    )
+    if answer.metadata.get("refused"):
+        console.print("[yellow]The model reported insufficient evidence.[/]")
+
+
+def _print_retrieval(result: Any, *, show_text: bool = False) -> None:
+    table = Table(title=f"Retrieved {len(result.results)} chunks")
+    table.add_column("#", justify="right", width=3)
+    table.add_column("document", style="cyan", no_wrap=True, width=22)
+    table.add_column("pg", justify="right", width=4)
+    table.add_column("type", style="magenta", width=7)
+    table.add_column("score", justify="right", width=6)
+    table.add_column("found by", width=12)
+    table.add_column("text", overflow="ellipsis", no_wrap=True, max_width=44)
+
+    for hit in result.results:
+        chunk = hit.chunk
+        body = chunk.text
+        header = chunk.metadata.get("context_header")
+        if header and body.startswith(header):
+            body = body[len(header) :].lstrip()
+        table.add_row(
+            str(hit.rank),
+            str(chunk.metadata.get("doc_title", chunk.doc_id)),
+            str(chunk.page_number),
+            chunk.chunk_type.value,
+            f"{hit.score:.4f}",
+            ",".join(f"{k}#{v}" for k, v in sorted(hit.component_ranks.items())),
+            " ".join(body.split()),
+        )
+    console.print(table)
+    console.print(f"[dim]{result.diagnostics}[/]")
+    console.print(
+        "[dim]" + " ".join(f"{k}={v:.0f}ms" for k, v in result.latency_ms.items()) + "[/]"
+    )
+
+    if show_text:
+        for hit in result.results:
+            console.print(f"\n[bold]#{hit.rank} {hit.chunk.chunk_id}[/]")
+            console.print(hit.chunk.text)
 
 
 # ---------------------------------------------------------------------------
