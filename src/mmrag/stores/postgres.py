@@ -45,14 +45,21 @@ _BATCH = 500
 class PostgresStore:
     """Metadata store. Open with :meth:`connect` or use as a context manager."""
 
-    def __init__(self, dsn: str | None = None):
+    def __init__(self, dsn: str | None = None, *, connect_timeout: int = 5):
         self.dsn = dsn or get_settings().postgres_dsn
+        # Without an explicit timeout, connecting to a stopped container blocks
+        # for the OS default (minutes on Windows). Ingestion is designed to fall
+        # back to sidecar-only output when the database is down, and it can only
+        # do that if the attempt fails promptly.
+        self.connect_timeout = connect_timeout
         self._conn: psycopg.Connection[Any] | None = None
 
     # -- lifecycle ----------------------------------------------------------
 
     def __enter__(self) -> PostgresStore:
-        self._conn = psycopg.connect(self.dsn, row_factory=dict_row)
+        self._conn = psycopg.connect(
+            self.dsn, row_factory=dict_row, connect_timeout=self.connect_timeout
+        )
         return self
 
     def __exit__(self, *exc: object) -> None:
