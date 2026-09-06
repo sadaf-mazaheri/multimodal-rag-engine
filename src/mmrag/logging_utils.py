@@ -6,6 +6,7 @@ output stays greppable when a run is piped to a file.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -16,11 +17,33 @@ from rich.logging import RichHandler
 _CONFIGURED = False
 
 
+def force_utf8_streams() -> None:
+    """Make stdout/stderr able to carry the characters real documents contain.
+
+    On Windows the console defaults to a legacy code page (cp1252), so printing
+    a character a PDF actually used -- U+2217 from a paper's author footnote,
+    say -- raises UnicodeEncodeError and kills the command. Since this tool
+    exists to display extracted document text, that is not an edge case.
+
+    ``errors="replace"`` rather than "strict": a character that cannot be shown
+    should degrade to a placeholder, never abort the run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            # A detached or already-wrapped stream cannot be reconfigured; that
+            # is fine, it just keeps whatever encoding it has.
+            with contextlib.suppress(ValueError, OSError):  # pragma: no cover
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def setup_logging(level: str | int | None = None, *, force: bool = False) -> None:
     """Configure the root logger once per process."""
     global _CONFIGURED
     if _CONFIGURED and not force:
         return
+
+    force_utf8_streams()
 
     resolved = level or os.environ.get("MMRAG_LOG_LEVEL", "INFO")
     if isinstance(resolved, str):

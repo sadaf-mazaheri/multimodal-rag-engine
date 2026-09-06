@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -26,8 +27,13 @@ corpus_app = typer.Typer(
     help="Acquire and verify the source document corpus.", no_args_is_help=True
 )
 config_app = typer.Typer(help="Inspect experiment configuration.", no_args_is_help=True)
+ingest_app = typer.Typer(
+    help="Parse the corpus into the shared Document/Page/Element representation.",
+    no_args_is_help=True,
+)
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(config_app, name="config")
+app.add_typer(ingest_app, name="ingest")
 
 console = Console()
 
@@ -206,6 +212,214 @@ def config_env() -> None:
     from mmrag.config import get_settings
 
     console.print_json(json.dumps(get_settings().redacted()))
+
+
+# ---------------------------------------------------------------------------
+# ingest
+# ---------------------------------------------------------------------------
+
+
+@ingest_app.command("run")
+def ingest_run(
+    doc_id: list[str] = typer.Option(None, "--doc-id", "-d", help="Restrict to these ids"),
+    config_name: str = typer.Option("method1", "--config", "-c", help="Experiment config"),
+    force: bool = typer.Option(False, "--force", help="Re-parse even if a sidecar exists"),
+    max_pages: int | None = typer.Option(
+        None, "--max-pages", help="Cap pages per document (for quick smoke runs)"
+    ),
+    no_postgres: bool = typer.Option(
+        False, "--no-postgres", help="Write only the JSON sidecars, skip the database"
+    ),
+) -> None:
+    """Parse PDFs into documents, pages, and elements.
+
+    Ingestion is shared by all three methods, so this runs once regardless of
+    which method you intend to evaluate.
+    """
+    from mmrag.config import load_experiment_config
+    from mmrag.corpus import CorpusManifest
+    from mmrag.ingestion.pipeline import IngestionPipeline
+
+    cfg = load_experiment_config(config_name)
+    if max_pages is not None:
+        cfg.ingestion.max_pages_per_doc = max_pages
+
+    manifest = CorpusManifest.load()
+    ids = list(doc_id) if doc_id else None
+
+    store = None
+    if not no_postgres:
+        from mmrag.stores.postgres import PostgresStore
+
+        store = PostgresStore()
+
+    def run(active_store: object | None) -> list[Any]:
+        pipeline = IngestionPipeline(cfg, store=active_store)
+        return pipeline.ingest_corpus(manifest, doc_ids=ids, force=force)
+
+    if store is not None:
+        try:
+            with store:
+                results = run(store)
+        except Exception as exc:
+            console.print(
+                f"[yellow]Postgres unavailable ({exc}); writing sidecars only. "
+                "Start it with 'docker compose up -d'.[/]"
+            )
+            results = run(None)
+    else:
+        results = run(None)
+
+    table = Table(title="Ingestion results")
+    table.add_column("doc_id", style="cyan", no_wrap=True)
+    table.add_column("status")
+    table.add_column("pages", justify="right")
+    table.add_column("elements", justify="right")
+    table.add_column("tables", justify="right")
+    table.add_column("figures", justify="right")
+    table.add_column("conf", justify="right")
+    table.add_column("time", justify="right")
+    table.add_column("db", justify="center")
+
+    colours = {"ingested": "green", "skipped": "blue", "failed": "red"}
+    for r in results:
+        by_type = r.stats.get("by_type", {})
+        figures = sum(by_type.get(t, 0) for t in ("figure", "chart", "diagram"))
+        table.add_row(
+            r.doc_id,
+            f"[{colours.get(r.status, 'white')}]{r.status}[/]",
+            str(r.n_pages),
+            str(r.n_elements),
+            str(by_type.get("table", 0)),
+            str(figures),
+            f"{r.stats.get('mean_confidence', 0):.2f}",
+            f"{r.elapsed_s:.1f}s",
+            "[green]yes[/]" if r.stored_in_postgres else "[yellow]no[/]",
+        )
+    console.print(table)
+
+    failed = [r for r in results if not r.ok]
+    for r in failed:
+        console.print(f"[red]{r.doc_id}:[/] {r.message}")
+    if failed:
+        raise typer.Exit(code=1)
+
+
+@ingest_app.command("show")
+def ingest_show(
+    doc_id: str = typer.Argument(..., help="Document to inspect"),
+    page: int | None = typer.Option(None, "--page", "-p", help="Restrict to one page"),
+    element_type: str | None = typer.Option(None, "--type", "-t", help="Filter by element type"),
+    geometry: bool = typer.Option(
+        False, "--geometry", "-g", help="Show bbox, reading order and parent links"
+    ),
+    limit: int = typer.Option(30, "--limit", "-n"),
+) -> None:
+    """Inspect parsed elements and their provenance, straight from the sidecar."""
+    from mmrag.ingestion.pipeline import read_sidecar, sidecar_path_for
+
+    path = sidecar_path_for(doc_id)
+    if not path.exists():
+        console.print(f"[red]No parsed output for {doc_id}.[/] Run 'mmrag ingest run -d {doc_id}'.")
+        raise typer.Exit(code=1)
+
+    parsed = read_sidecar(path)
+    doc = parsed.document
+    console.print(
+        f"[bold cyan]{doc.title}[/]\n"
+        f"  type=[magenta]{doc.doc_type.value}[/] domain={doc.domain} lang={doc.language} "
+        f"published={doc.publication_date}\n"
+        f"  pages={doc.n_pages_ingested}/{doc.n_pages} sha256={doc.sha256[:12]} "
+        f"parser={doc.parser_version}"
+    )
+
+    elements = parsed.elements
+    if page is not None:
+        elements = [e for e in elements if e.page_number == page]
+    if element_type:
+        elements = [e for e in elements if e.element_type.value == element_type]
+
+    table = Table(
+        title=f"Elements ({len(elements)} matching, showing {min(limit, len(elements))})",
+        pad_edge=False,
+    )
+    # Explicit widths on the fixed columns; the content column takes whatever
+    # is left. Without this rich starves the small columns to widen content.
+    table.add_column("element", style="cyan", no_wrap=True, width=16)
+    table.add_column("type", style="magenta", no_wrap=True, width=8)
+    table.add_column("pg", justify="right", no_wrap=True, width=3)
+    table.add_column("conf", justify="right", no_wrap=True, width=4)
+    if geometry:
+        # Only shown on request: these three columns squeeze the content column
+        # to uselessness in an 80-column terminal.
+        table.add_column("ord", justify="right", no_wrap=True, width=3)
+        table.add_column("bbox", no_wrap=True, width=19)
+        table.add_column("parent", no_wrap=True, width=12)
+    table.add_column("content", overflow="ellipsis", no_wrap=True, max_width=60)
+
+    for e in elements[:limit]:
+        row = [
+            e.element_id.split("#", 1)[-1],
+            e.element_type.value,
+            str(e.page_number),
+            f"{e.extraction_confidence:.2f}",
+        ]
+        if geometry:
+            bbox = (
+                f"{e.bbox.x0:.2f},{e.bbox.y0:.2f}-{e.bbox.x1:.2f},{e.bbox.y1:.2f}"
+                if e.bbox
+                else "-"
+            )
+            row += [str(e.reading_order), bbox, (e.parent_id or "-").split("#")[-1]]
+        row.append(e.best_text().replace("\n", " ")[:200] or "[dim](no text)[/]")
+        table.add_row(*row)
+
+    console.print(table)
+    if not geometry:
+        console.print("[dim]Pass --geometry for bounding boxes, reading order and parent links.[/]")
+
+
+@ingest_app.command("status")
+def ingest_status() -> None:
+    """Per-document corpus statistics from Postgres."""
+    from mmrag.stores.postgres import PostgresStore
+
+    try:
+        with PostgresStore() as store:
+            rows = store.corpus_stats()
+    except Exception as exc:
+        console.print(f"[red]Postgres unavailable:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if not rows:
+        console.print("[yellow]No documents ingested yet.[/] Run 'mmrag ingest run'.")
+        return
+
+    table = Table(title="Ingested corpus")
+    table.add_column("doc_id", style="cyan", no_wrap=True)
+    table.add_column("type", style="magenta")
+    table.add_column("pages", justify="right")
+    table.add_column("elements", justify="right")
+    table.add_column("tables", justify="right")
+    table.add_column("figures", justify="right")
+    table.add_column("captioned", justify="right")
+    table.add_column("conf", justify="right")
+
+    for r in rows:
+        table.add_row(
+            r["doc_id"],
+            r["doc_type"],
+            f"{r['pages_stored']}/{r['n_pages']}",
+            str(r["elements"]),
+            str(r["tables"]),
+            str(r["figures"]),
+            str(r["captioned"]),
+            str(r["mean_confidence"] or "-"),
+        )
+    console.print(table)
+    console.print(
+        f"[bold]Total:[/] {sum(r['elements'] for r in rows)} elements across {len(rows)} documents"
+    )
 
 
 # ---------------------------------------------------------------------------

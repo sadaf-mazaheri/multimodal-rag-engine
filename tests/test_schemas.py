@@ -17,6 +17,8 @@ from mmrag.schemas import (
     ChunkType,
     Element,
     ElementType,
+    FigureData,
+    TableData,
     make_chunk_id,
     make_element_id,
     make_page_id,
@@ -137,12 +139,12 @@ class TestBestText:
         e = _element(
             element_type=ElementType.TABLE,
             caption="Table 1: Revenue",
-            table_markdown="| a | b |\n|---|---|",
+            table=TableData(n_rows=1, n_cols=2, markdown="| a | b |\n|---|---|"),
             text="ignored raw dump",
         )
         assert e.best_text() == "Table 1: Revenue\n| a | b |\n|---|---|"
 
-    def test_table_without_markdown_falls_back_to_raw_text(self):
+    def test_table_without_structured_payload_falls_back_to_raw_text(self):
         e = _element(element_type=ElementType.TABLE, text="a b c")
         assert e.best_text() == "a b c"
 
@@ -150,17 +152,22 @@ class TestBestText:
         e = _element(
             element_type=ElementType.CHART,
             caption="Figure 2",
-            description="A bar chart of revenue by year.",
-            ocr_text="2021 2022 2023",
+            figure=FigureData(
+                description="A bar chart of revenue by year.", ocr_text="2021 2022 2023"
+            ),
         )
         assert e.best_text() == "Figure 2\nA bar chart of revenue by year.\n2021 2022 2023"
 
     def test_figure_with_no_derived_text_is_empty(self):
         """The failure mode Method 1 is meant to expose: an invisible figure."""
-        assert _element(element_type=ElementType.DIAGRAM).best_text() == ""
+        assert _element(element_type=ElementType.DIAGRAM, figure=FigureData()).best_text() == ""
 
     def test_blank_and_whitespace_parts_are_dropped(self):
-        e = _element(element_type=ElementType.FIGURE, caption="   ", description="real")
+        e = _element(
+            element_type=ElementType.FIGURE,
+            caption="   ",
+            figure=FigureData(description="real"),
+        )
         assert e.best_text() == "real"
 
 

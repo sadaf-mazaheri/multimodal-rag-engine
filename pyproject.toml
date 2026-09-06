@@ -80,6 +80,11 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B", "SIM", "N", "RUF"]
 ignore = ["B008"]  # typer uses function calls in argument defaults by design
 
+[tool.ruff.lint.per-file-ignores]
+# Ligatures, curly quotes and non-breaking spaces are the *subject* of the text
+# normalisation tests, so flagging them as ambiguous is exactly backwards.
+"tests/test_ingestion.py" = ["RUF001"]
+
 [tool.mypy]
 python_version = "3.10"
 packages = ["mmrag"]
