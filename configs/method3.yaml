@@ -1,0 +1,34 @@
+extends: default
+
+name: method3_hybrid_visual
+description: >
+  Hybrid visual multimodal RAG. Adds ColQwen2 late-interaction retrieval over
+  rendered page images to the Method 2 retriever set, fuses everything with RRF,
+  reranks, and hands both text evidence and original page images to a VLM.
+  The production-oriented architecture and the final row of the comparison table.
+method: method3
+
+enrichment:
+  ocr_enabled: true
+  vlm_captions_enabled: true
+
+embedding:
+  visual_model: vidore/colqwen2-v1.0
+  visual_dim: 128
+
+retrieval:
+  top_k: 10
+  candidates_per_retriever: 50
+  fusion_weights:
+    bm25: 1.0
+    dense: 1.0
+    table: 1.0
+    image: 0.7
+    visual_page: 1.5   # strongest single signal on chart/diagram queries
+  rerank_enabled: true
+  rerank_top_n: 25
+
+generation:
+  # The whole point: original page images go to the VLM alongside text evidence.
+  max_images: 3
+  image_detail: high

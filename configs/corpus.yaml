@@ -1,0 +1,189 @@
+version: 1
+description: >
+  Curated benchmark corpus. Fourteen freely-available documents chosen so that
+  every modality the system claims to handle is genuinely exercised, and so that
+  results can be sliced by document character: financial reports for dense
+  tables, policy and energy reports for charts, engineering documents for
+  diagrams and schematics, and research papers for equations, multi-column
+  layout and small inline figures.
+
+  This file is hand-authored and is never rewritten by tooling. Integrity data
+  (sha256, byte size, page count) lives in the generated companion file
+  configs/corpus.lock.yaml -- same split as package.json vs package-lock.json.
+
+  The PDFs are not committed. `mmrag corpus download` fetches them and verifies
+  each against the lockfile, so every clone of this repo indexes byte-identical
+  inputs. After adding or changing an entry, re-run `mmrag corpus lock`.
+
+  Licences are recorded per entry. All are publicly redistributable or freely
+  accessible for research; several are third-party copyright, which is exactly
+  why the files themselves stay out of git.
+
+entries:
+  # ---------------------------------------------------------------------
+  # Finance -- dense numeric tables, footnotes, some charts
+  # ---------------------------------------------------------------------
+  - doc_id: berkshire_ar_2023
+    title: Berkshire Hathaway Inc. 2023 Annual Report
+    url: https://www.berkshirehathaway.com/2023ar/2023ar.pdf
+    publisher: Berkshire Hathaway Inc.
+    category: finance
+    license: "Copyright Berkshire Hathaway Inc.; publicly published shareholder report"
+    modality_profile: [tables, dense_text]
+    notes: >
+      Audited financial statements. The hardest table case in the corpus:
+      multi-level headers, negative numbers in parentheses, and footnote markers
+      that a naive Markdown flattening will silently merge into the cell values.
+
+  - doc_id: fed_mpr_2024_07
+    title: Federal Reserve Monetary Policy Report, July 2024
+    url: https://www.federalreserve.gov/monetarypolicy/files/20240705_mprfullreport.pdf
+    publisher: Board of Governors of the Federal Reserve System
+    category: finance
+    license: "US Government work, public domain"
+    modality_profile: [charts, tables, dense_text]
+    notes: >
+      Time-series line charts where the answer to a question is only legible from
+      the plotted curve, not from any surrounding sentence. The clearest place to
+      see Method 1 lose to Method 3.
+
+  - doc_id: ecb_annual_report_2023
+    title: European Central Bank Annual Report 2023
+    url: https://www.ecb.europa.eu/pub/pdf/annrep/ecb.ar2023~d033c21ac2.en.pdf
+    publisher: European Central Bank
+    category: finance
+    license: "Copyright ECB; reproduction permitted with attribution"
+    modality_profile: [charts, tables, dense_text]
+    notes: Stacked-bar and area charts, plus boxed side-panels that break naive reading order.
+
+  # ---------------------------------------------------------------------
+  # Policy and energy -- chart-heavy, designed to be read visually
+  # ---------------------------------------------------------------------
+  - doc_id: ipcc_ar6_wg1_spm
+    title: "IPCC AR6 Working Group I: Summary for Policymakers"
+    url: https://www.ipcc.ch/report/ar6/wg1/downloads/report/IPCC_AR6_WGI_SPM.pdf
+    publisher: Intergovernmental Panel on Climate Change
+    category: policy
+    license: "Copyright IPCC; free for non-commercial and research use"
+    modality_profile: [charts, diagrams, dense_text]
+    notes: >
+      Composite multi-panel figures with their own internal legends and captions.
+      A single "figure" here is often five sub-plots, which stresses figure
+      segmentation as much as retrieval.
+
+  - doc_id: eia_aeo_2023
+    title: EIA Annual Energy Outlook 2023 (Narrative)
+    url: https://www.eia.gov/outlooks/aeo/pdf/AEO2023_Narrative.pdf
+    publisher: U.S. Energy Information Administration
+    category: energy
+    license: "US Government work, public domain"
+    modality_profile: [charts, tables, dense_text]
+    notes: Projection charts with scenario bands; numeric answers live in the plot, not the prose.
+
+  # ---------------------------------------------------------------------
+  # Health -- report layout, mixed tables and running text
+  # ---------------------------------------------------------------------
+  - doc_id: who_covid_sitrep_001
+    title: WHO Novel Coronavirus (2019-nCoV) Situation Report 1
+    url: https://www.who.int/docs/default-source/coronaviruse/situation-reports/20200121-sitrep-1-2019-ncov.pdf
+    publisher: World Health Organization
+    category: health
+    license: "CC BY-NC-SA 3.0 IGO"
+    modality_profile: [tables, multi_column, diagrams]
+    notes: >
+      Five pages with a case-count table and a map figure. The fastest
+      end-to-end smoke test in the corpus -- use `--doc-id who_covid_sitrep_001`
+      when iterating on the pipeline.
+
+  # ---------------------------------------------------------------------
+  # Technical -- schematics, block diagrams, register tables
+  # ---------------------------------------------------------------------
+  - doc_id: nasa_seh
+    title: NASA Systems Engineering Handbook (Rev 2)
+    url: https://www.nasa.gov/wp-content/uploads/2018/09/nasa_systems_engineering_handbook_0.pdf
+    publisher: NASA
+    category: technical
+    license: "US Government work, public domain"
+    page_limit: 150
+    modality_profile: [diagrams, tables, dense_text]
+    notes: >
+      Process flow diagrams and V-model schematics -- pure structure with almost
+      no extractable text, so caption and VLM description quality dominates
+      whether Method 1 can find them at all. Truncated to 150 of 297 pages.
+
+  - doc_id: rp2040_datasheet
+    title: RP2040 Datasheet
+    url: https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf
+    publisher: Raspberry Pi Ltd
+    category: technical
+    license: "Copyright Raspberry Pi Ltd; CC BY-ND"
+    page_limit: 120
+    modality_profile: [diagrams, tables, dense_text]
+    notes: >
+      Register maps and pin diagrams. The register tables are wide and dense,
+      and their meaning depends on column position -- the case where flattening
+      a table to Markdown either works perfectly or destroys the answer.
+      Truncated to 120 of 642 pages so it does not dominate the corpus.
+
+  - doc_id: nvidia_ampere_wp
+    title: NVIDIA A100 Tensor Core GPU Architecture Whitepaper
+    url: https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf
+    publisher: NVIDIA Corporation
+    category: technical
+    license: "Copyright NVIDIA Corporation; publicly distributed whitepaper"
+    modality_profile: [diagrams, charts, tables]
+    notes: Architecture block diagrams plus benchmark bar charts and spec-comparison tables.
+
+  # ---------------------------------------------------------------------
+  # Science -- two-column layout, equations, small inline figures
+  # ---------------------------------------------------------------------
+  - doc_id: arxiv_attention
+    title: Attention Is All You Need
+    url: https://arxiv.org/pdf/1706.03762
+    publisher: arXiv (1706.03762)
+    category: science
+    license: "arXiv non-exclusive licence to distribute"
+    modality_profile: [diagrams, tables, equations, multi_column]
+    notes: The Transformer architecture diagram; a canonical "answer is only in the figure" case.
+
+  - doc_id: arxiv_rag
+    title: Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks
+    url: https://arxiv.org/pdf/2005.11401
+    publisher: arXiv (2005.11401)
+    category: science
+    license: "arXiv non-exclusive licence to distribute"
+    modality_profile: [diagrams, tables, equations, multi_column]
+    notes: Included partly so the benchmark can be asked questions about its own subject matter.
+
+  - doc_id: arxiv_colpali
+    title: "ColPali: Efficient Document Retrieval with Vision Language Models"
+    url: https://arxiv.org/pdf/2407.01449
+    publisher: arXiv (2407.01449)
+    category: science
+    license: "arXiv non-exclusive licence to distribute"
+    modality_profile: [charts, tables, diagrams, multi_column]
+    notes: >
+      The paper behind Method 3. Its own results tables are a useful probe: a
+      question about them is answerable from the table, and the ablation figures
+      are answerable only visually.
+
+  - doc_id: arxiv_tapas
+    title: "TAPAS: Weakly Supervised Table Parsing via Pre-training"
+    url: https://arxiv.org/pdf/2004.08483
+    publisher: arXiv (2004.08483)
+    category: science
+    license: "arXiv non-exclusive licence to distribute"
+    modality_profile: [tables, equations, multi_column]
+    notes: Table-reasoning paper containing tables about table reasoning; dense numeric results grids.
+
+  - doc_id: alphafold_nature_2021
+    title: Highly accurate protein structure prediction with AlphaFold
+    url: https://www.nature.com/articles/s41586-021-03819-2.pdf
+    publisher: Nature (open access)
+    category: science
+    license: "CC BY 4.0"
+    modality_profile: [charts, diagrams, photos, multi_column]
+    notes: >
+      Rendered 3D protein structures -- the one genuinely photographic case,
+      where OCR returns nothing and only a VLM description or the page image
+      itself carries any signal.

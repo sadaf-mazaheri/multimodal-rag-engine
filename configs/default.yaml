@@ -1,0 +1,89 @@
+# Baseline configuration. Every method config extends this file, so anything
+# stated here is held constant across the comparison -- which is what makes the
+# benchmark a controlled experiment rather than three unrelated pipelines.
+
+name: default
+description: Shared baseline. Not runnable on its own; extended by method1/2/3.
+method: method1
+
+ingestion:
+  parser: pymupdf
+  page_image_dpi: 150
+  figure_image_dpi: 200
+  min_figure_area_ratio: 0.01
+  extract_tables: true
+  extract_figures: true
+  caption_max_gap_ratio: 0.06
+  max_pages_per_doc: null
+
+enrichment:
+  # Both off by default so a fresh clone can ingest with no API key and no
+  # system binaries. Turn on per method config once you have them.
+  ocr_enabled: false
+  ocr_backend: tesseract
+  ocr_languages: eng
+  ocr_min_chars: 8
+  vlm_captions_enabled: false
+  vlm_max_elements: null
+  vlm_prompt_style: describe_and_transcribe
+
+chunking:
+  target_tokens: 384
+  overlap_tokens: 64
+  respect_page_boundaries: true
+  max_table_tokens: 1024
+  prepend_context_header: true
+
+embedding:
+  # Local and open-source: retrieval quality must not depend on an API key.
+  # bge-small is 384-dim and runs at a usable speed on CPU.
+  text_model: BAAI/bge-small-en-v1.5
+  text_dim: 384
+  query_prefix: "Represent this sentence for searching relevant passages: "
+  passage_prefix: ""
+  normalize: true
+  batch_size: 32
+  device: auto
+  max_seq_length: 512
+  image_model: sentence-transformers/clip-ViT-B-32
+  image_dim: 512
+  visual_model: vidore/colqwen2-v1.0
+  visual_dim: 128
+
+retrieval:
+  top_k: 10
+  candidates_per_retriever: 50
+  bm25_k1: 1.5
+  bm25_b: 0.75
+  rrf_k: 60
+  fusion_weights: {}
+  rerank_enabled: false
+  rerank_model: BAAI/bge-reranker-base
+  rerank_top_n: 25
+
+router:
+  strategy: heuristic
+  fallback_to_all: true
+  min_confidence: 0.5
+
+generation:
+  text_model: gpt-4o-mini
+  vision_model: gpt-4o-mini
+  temperature: 0.0
+  max_output_tokens: 1024
+  max_context_tokens: 6000
+  max_images: 3
+  image_detail: high
+  cite_sources: true
+  refuse_without_evidence: true
+  request_timeout_s: 120.0
+  max_retries: 3
+
+evaluation:
+  k_values: [1, 3, 5, 10]
+  retrieval_metrics: [recall, precision, mrr, ndcg, hit_rate]
+  answer_metrics: [exact_match, token_f1, citation_accuracy]
+  llm_judge_enabled: false
+  llm_judge_model: gpt-4o-mini
+  bootstrap_samples: 1000
+  random_seed: 42

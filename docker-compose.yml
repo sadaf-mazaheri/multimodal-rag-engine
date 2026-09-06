@@ -1,0 +1,53 @@
+# Infrastructure for the multimodal RAG benchmark.
+#
+#   docker compose up -d      start Postgres (metadata) + Qdrant (vectors)
+#   docker compose down       stop, keeping volumes
+#   docker compose down -v    stop and wipe all indexed data
+#
+# Ports are configurable via .env so this can coexist with other local services.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mmrag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mmrag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mmrag}
+      POSTGRES_DB: ${POSTGRES_DB:-mmrag}
+      # Deterministic collation so ORDER BY on text is stable across machines.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Everything in this directory runs once, on first initialisation of the volume.
+      - ./scripts/sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mmrag} -d ${POSTGRES_DB:-mmrag}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: mmrag-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__ENABLE_TLS: "false"
+      QDRANT__LOG_LEVEL: "INFO"
+    healthcheck:
+      # The image is distroless, so use Qdrant's own readiness endpoint via its bundled check.
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  qdrant_data:

@@ -1,0 +1,25 @@
+extends: default
+
+name: method1_textified
+description: >
+  Textified multimodal RAG. Every modality is flattened into text -- tables to
+  Markdown, figures to caption + OCR + VLM description -- and then retrieved by
+  a single hybrid BM25 + dense pipeline. Establishes the baseline and, by
+  comparison against Methods 2 and 3, quantifies how much is lost in the
+  flattening.
+method: method1
+
+enrichment:
+  # Method 1 lives or dies on the quality of the text it flattens visuals into,
+  # so the enrichment passes are its core mechanism, not an optional extra.
+  ocr_enabled: true
+  vlm_captions_enabled: true
+
+retrieval:
+  top_k: 10
+  candidates_per_retriever: 50
+  # Dense and BM25 contribute equally; the ablation in the report varies this.
+  fusion_weights:
+    bm25: 1.0
+    dense: 1.0
+  rerank_enabled: false

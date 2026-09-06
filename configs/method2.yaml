@@ -1,0 +1,31 @@
+extends: default
+
+name: method2_modality_aware
+description: >
+  Modality-aware RAG. Each modality keeps its native representation and gets a
+  specialised retriever: text via BM25 + dense, tables via structure-aware
+  retrieval, figures via CLIP image embeddings, and document metadata via
+  Postgres. A query router picks which retrievers to fire, and their results are
+  fused. Measures the benefit of not flattening.
+method: method2
+
+enrichment:
+  # Captions still help the table and figure retrievers, but they are no longer
+  # the only representation of a visual element.
+  ocr_enabled: true
+  vlm_captions_enabled: true
+
+retrieval:
+  top_k: 10
+  candidates_per_retriever: 50
+  fusion_weights:
+    bm25: 1.0
+    dense: 1.0
+    table: 1.0
+    image: 0.7   # CLIP text-image similarity is the noisiest signal here
+  rerank_enabled: true
+  rerank_top_n: 25
+
+router:
+  strategy: heuristic
+  fallback_to_all: true
