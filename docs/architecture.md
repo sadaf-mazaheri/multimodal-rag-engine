@@ -158,15 +158,37 @@ Step 6 should report the reranker-off ablation alongside, and
 
 ---
 
-## Enrichment gap (open)
+## Enrichment
 
-`method1.yaml` and `method2.yaml` both set `ocr_enabled: true` and
-`vlm_captions_enabled: true`, but neither pass is implemented yet. So the 147
-figures with no retrievable text lack it because nothing has tried to extract
-it, not because extraction failed.
+Enrichment is **shared infrastructure**, not a method's property. It runs in
+`ingestion/pipeline.py` between parsing and writing the sidecar, so recovered
+text lands in the representation both methods read. Neither can be enriched
+without the other, which is what keeps a Method 1 vs Method 2 difference
+attributable to retrieval rather than to one of them having been handed better
+text. `tests/test_ocr.py` asserts the two configs agree on every OCR setting.
 
-This matters for interpretation: Method 2's image-retrieval advantage on those
-figures is currently measured against a Method 1 that has not been given the
-textification its own design allows. Either implement both passes, or turn the
-flags off and state that the baseline is caption-only, before publishing a
-Method 1 vs Method 2 or Method 3 comparison.
+| Pass | Module | Status |
+|---|---|---|
+| OCR | `ingestion/ocr.py` | Implemented. `rapidocr` (default, pip-only) or `tesseract` behind one `OcrEngine` protocol |
+| VLM captions | — | **Not implemented.** `vlm_captions_enabled` is `false` in every config so no run manifest asserts a pass that never ran |
+
+Why this mattered: before OCR existed, a figure's entire textual representation
+was its caption, so a figure without one was unreachable by any text query. The
+audit found many of those were not visual content at all — register-description
+tables, infographic pull-quotes, section-divider banners — i.e. *text* that
+belongs to the textified baseline by right. Crediting Method 2's image retriever
+for recovering them would have measured an ingestion gap, not an architectural
+advantage.
+
+The pass is deliberately conservative about what it keeps: recovered text must
+clear `ocr_min_chars` and be at least half alphanumeric, because OCR on a
+genuinely textless plot returns axis marks that pass a length check on their
+own. A figure that really is image-only stays textless, which is what keeps
+Method 2's remaining claim honest.
+
+Provenance is preserved rather than overwritten. `extraction_method` still
+records how the element was *found* — error analysis slices on it, and OCR did
+not find it. What OCR did is recorded beside it in `figure.ocr_text`,
+`figure.ocr_confidence` and `element.metadata["ocr"]`, and the per-document
+`stats.ocr` block records the backend and version, so "OCR ran and found
+nothing" is distinguishable from "OCR never ran".

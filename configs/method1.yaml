@@ -13,7 +13,10 @@ enrichment:
   # Method 1 lives or dies on the quality of the text it flattens visuals into,
   # so the enrichment passes are its core mechanism, not an optional extra.
   ocr_enabled: true
-  vlm_captions_enabled: true
+  # Off because no VLM captioning pass exists yet. A run manifest records the
+  # config verbatim, so leaving this true would have every index assert an
+  # enrichment that never ran.
+  vlm_captions_enabled: false
 
 retrieval:
   top_k: 10

@@ -11,9 +11,12 @@ method: method2
 
 enrichment:
   # Captions still help the table and figure retrievers, but they are no longer
-  # the only representation of a visual element.
+  # the only representation of a visual element. OCR must match Method 1's
+  # setting exactly: both read the same sidecars, so an asymmetry here would
+  # be an asymmetry in the shared representation rather than in retrieval.
   ocr_enabled: true
-  vlm_captions_enabled: true
+  # Off for the same reason as method1: the pass does not exist yet.
+  vlm_captions_enabled: false
 
 retrieval:
   top_k: 10

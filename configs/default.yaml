@@ -20,7 +20,9 @@ enrichment:
   # Both off by default so a fresh clone can ingest with no API key and no
   # system binaries. Turn on per method config once you have them.
   ocr_enabled: false
-  ocr_backend: tesseract
+  # rapidocr ships its models in the wheel, so `pip install -e ".[ocr]"` is
+  # enough; tesseract additionally needs the binary on PATH.
+  ocr_backend: rapidocr
   ocr_languages: eng
   ocr_min_chars: 8
   vlm_captions_enabled: false

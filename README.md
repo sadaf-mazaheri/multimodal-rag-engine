@@ -73,7 +73,8 @@ reproducibility.
 python -m pip install -e ".[openai,dev]"
 ```
 
-Optional extras: `ocr` (needs the Tesseract binary on PATH), `visual`
+Optional extras: `ocr` (self-contained — `rapidocr` ships its models in the
+wheel, so no system package is needed), `visual`
 (ColQwen2 — practically needs a GPU), `local` (offline generation).
 
 ### 2. Configure

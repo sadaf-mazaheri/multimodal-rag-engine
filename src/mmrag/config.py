@@ -144,14 +144,17 @@ class IngestionConfig(BaseModel):
 class EnrichmentConfig(BaseModel):
     """Optional passes that add derived text to visual elements.
 
-    Both are off by default: OCR needs a system binary and VLM captioning costs
-    money, so a first ingestion run should work with neither.
+    Both are off by default so a first ingestion run needs no extra setup and
+    no API key.
     """
 
     ocr_enabled: bool = False
-    ocr_backend: Literal["tesseract"] = "tesseract"
+    # ``rapidocr`` installs from PyPI with its models inside the wheel, so
+    # ``pip install -e ".[ocr]"`` is enough to reproduce an ingestion run.
+    # ``tesseract`` additionally needs the binary on PATH.
+    ocr_backend: Literal["rapidocr", "tesseract"] = "rapidocr"
     ocr_languages: str = "eng"
-    # Skip OCR when the crop already sits next to plenty of real text.
+    # Recovered text shorter than this is speckle, not content.
     ocr_min_chars: int = 8
 
     vlm_captions_enabled: bool = False

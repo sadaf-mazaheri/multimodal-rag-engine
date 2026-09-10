@@ -765,12 +765,25 @@ def doctor() -> None:
         row("provider", True, f"{settings.generation_provider} (no OpenAI key needed)")
 
     # --- optional extras ---
+    # Probe the backend the experiment config actually selects, not a fixed one:
+    # reporting Tesseract as missing while rapidocr is configured and working
+    # would send someone installing a binary they do not need.
     try:
-        import pytesseract
+        from mmrag.config import load_experiment_config
+        from mmrag.ingestion.ocr import get_engine
 
-        row("tesseract", True, str(pytesseract.get_tesseract_version()))
-    except Exception as exc:
-        row("tesseract", None, f"OCR disabled -- {type(exc).__name__}")
+        enrichment = load_experiment_config("method1").enrichment
+        engine = get_engine(enrichment)
+        if engine is not None:
+            row(f"ocr ({engine.name})", True, engine.version)
+        else:
+            row(
+                f"ocr ({enrichment.ocr_backend})",
+                None,
+                'not installed -- pip install -e ".[ocr]"',
+            )
+    except Exception as exc:  # pragma: no cover - defensive; doctor must not crash
+        row("ocr", None, f"unavailable -- {type(exc).__name__}")
 
     try:
         import colpali_engine  # noqa: F401

@@ -14,16 +14,26 @@ check performed once.
 
 What a chunk id actually commits to
 -----------------------------------
-``make_chunk_id`` hashes ``variant | doc_id | page_number | element_ids`` -- the
-*grouping*, not the text. So ids alone would not notice an element whose content
-changed while its identity stayed put, which is exactly what an OCR pass will
-do: same figure element, same id, newly non-empty text. Each id is therefore
-frozen alongside a digest of its chunk text, letting the test separate three
-kinds of drift:
+``Chunker`` builds the id from ``variant | doc_id | page_number | element_ids |
+body``, so it covers both the grouping *and* the body text. A chunk whose text
+changes therefore gets a new id rather than keeping its own: the OCR pass showed
+this plainly, where 232 figures that gained recovered text appeared as 232
+removals paired with 232 additions.
 
-* **added**   -- chunks that did not exist before (new elements, new grouping)
-* **removed** -- chunks that no longer exist (elements dropped or merged)
-* **changed** -- same chunk id, different text (enrichment, normalisation)
+The frozen digest is taken over ``Chunk.text``, which is *not* quite ``body``:
+with ``prepend_context_header`` the stored text carries a
+``Document > Section > Subsection`` breadcrumb that the id does not hash. So the
+digest covers the one class of drift the id cannot see -- a change to the
+breadcrumb, from section tracking, document metadata, or the flag itself,
+altering what gets embedded while every id stays put.
+
+The three categories the test reports:
+
+* **added**   -- chunks that did not exist before (new elements, new grouping,
+  or changed body text)
+* **removed** -- chunks that no longer exist
+* **changed** -- same id, different stored text: a breadcrumb change, since the
+  body is already covered by the id
 
 Updating the baseline deliberately
 ----------------------------------

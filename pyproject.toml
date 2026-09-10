@@ -44,9 +44,11 @@ dependencies = [
 # installed and exercised with zero API dependencies.
 openai = ["openai>=1.40"]
 
-# Optional OCR backend for scanned pages / text baked into figures.
-# Also requires the Tesseract binary on PATH.
-ocr = ["pytesseract>=0.3.10"]
+# OCR for text baked into figure images. rapidocr is the default backend and
+# ships its ONNX models inside the wheel, so this extra alone is enough to
+# reproduce an ingestion run -- no system package. pytesseract is kept for the
+# alternative backend and additionally needs the Tesseract binary on PATH.
+ocr = ["rapidocr-onnxruntime>=1.4,<2", "pytesseract>=0.3.10"]
 
 # Method 3 visual retrieval. Practically requires a GPU; on a CPU-only box the
 # index is built out-of-band via notebooks/colab_visual_indexing.ipynb.
