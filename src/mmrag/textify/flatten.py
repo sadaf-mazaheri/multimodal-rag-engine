@@ -35,6 +35,9 @@ class FlattenReport:
     skipped_child: int = 0
     empty_by_type: Counter[str] = field(default_factory=Counter)
     empty_element_ids: list[str] = field(default_factory=list)
+    # Textless visuals retained anyway, for a method with a non-textual index.
+    # Counted separately so "kept" and "empty" still reconcile against total.
+    kept_textless_visuals: int = 0
 
     @property
     def empty(self) -> int:
@@ -61,6 +64,7 @@ class FlattenReport:
             "empty": self.empty,
             "empty_by_type": dict(sorted(self.empty_by_type.items())),
             "invisible_figures": self.invisible_figures,
+            "kept_textless_visuals": self.kept_textless_visuals,
         }
 
 
@@ -129,12 +133,25 @@ def flatten_elements(
     elements: list[Element],
     *,
     skip_boilerplate: bool = True,
+    keep_textless_visuals: bool = False,
 ) -> tuple[list[Element], FlattenReport]:
-    """Select the elements Method 1 will index, and report what it lost.
+    """Select the elements a method will index, and report what it lost.
 
     Returns the retained elements in their original order, plus a report. The
     elements themselves are unchanged: flattening to a string happens per chunk,
     via :meth:`Element.best_text`.
+
+    ``keep_textless_visuals`` retains figures that produced no text at all.
+    They are still *counted* as empty either way -- the measurement is
+    unchanged -- but a method with a non-textual index for them needs the
+    elements themselves, not just the tally.
+
+    Default ``False`` keeps Method 1 exactly as it was: for a purely textual
+    pipeline, a figure with no text is unretrievable, and indexing an empty
+    string would add a chunk that can never match while diluting every score.
+    Method 2 sets it ``True`` because its CLIP index can reach those figures
+    through their pixels -- and without this flag it silently could not, since
+    they would never become chunks at all.
     """
     by_id = {e.element_id: e for e in elements}
     report = FlattenReport(total=len(elements))
@@ -149,12 +166,15 @@ def flatten_elements(
             continue
 
         if not element.best_text().strip():
-            # Recorded rather than merely dropped: an element that exists in the
-            # corpus but contributes nothing to this index is exactly the
-            # measurement Method 1 is here to produce.
+            # Counted regardless of whether it is kept: an element that exists
+            # in the corpus but contributes no text is exactly the measurement
+            # Method 1 is here to produce, and Method 2's headline claim is that
+            # it can retrieve these anyway.
             report.empty_by_type[element.element_type.value] += 1
             report.empty_element_ids.append(element.element_id)
-            continue
+            if not (keep_textless_visuals and element.element_type.is_visual):
+                continue
+            report.kept_textless_visuals += 1
 
         report.kept += 1
         kept.append(element)

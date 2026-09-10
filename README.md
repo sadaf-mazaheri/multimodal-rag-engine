@@ -31,7 +31,7 @@ This project is being built in stages. Current state:
 - [x] **Step 1** — Pinned corpus manifest/lockfile + verifying downloader
 - [x] **Step 2** — Shared ingestion: PDF → elements with rich metadata and provenance
 - [x] **Step 3** — Method 1: Textified hybrid RAG
-- [ ] **Step 4** — Method 2: Modality-aware retrieval + query router
+- [x] **Step 4** — Method 2: Modality-aware retrieval + query router
 - [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2)
 - [ ] **Step 6** — Evaluation harness and comparison report
 
@@ -337,6 +337,76 @@ and tested for free.
 
 ---
 
+## Method 2 — Modality-Aware RAG
+
+Each modality keeps its native representation and gets a retriever suited to it.
+A router reads the query and fires only the retrievers that could plausibly hold
+the answer; their ranked lists are fused and reranked.
+
+```bash
+mmrag index build --config method2
+mmrag query "Which table lists confirmed cases by country?" -c method2 --retrieve-only
+mmrag query "What does the architecture diagram show?" -c method2 --provider echo
+```
+
+### The four retrievers
+
+| Retriever | Signal | Answers |
+|---|---|---|
+| `bm25` | lexical over text chunks | exact identifiers, figures, names |
+| `dense` | bge over text chunks | paraphrase, conceptual questions |
+| `table` | BM25 over **cells** + dense over **schema** | "which table contains 22,360" *and* "which table is about revenue by segment" |
+| `image` | CLIP over figure crops + BM25 over figure text | figures — including ones with no text at all |
+
+### What Method 2 can do that Method 1 structurally cannot
+
+Method 1 reports **147 of 400 figures with no retrievable text**: no caption, no
+OCR, no description. No text index can reach them under any query.
+
+**All 147 have a cropped image on disk.** CLIP puts images and text in one
+space, so a text query scores directly against the pixels with no textual
+intermediary. That is the concrete mechanism behind any advantage Method 2 shows
+on figure questions, and the index build reports it as
+`text_invisible_recoverable`.
+
+### Two views of a table, not one
+
+Flattened to Markdown, a table's column headers are three tokens among hundreds
+of digits — so "which table breaks revenue down by segment" has almost nothing
+to match. Method 2 indexes tables twice:
+
+- **schema view** — caption, column headers, table type, shape. Short and
+  semantic; dense retrieval handles it.
+- **content view** — the cells. Long and literal; BM25 handles it.
+
+Both point at the same `chunk_id`, so provenance is unchanged.
+
+### Routing
+
+Rule-based, not model-based: deterministic, free, and inspectable, so a bad
+route traces to the exact phrase that caused it. An LLM router is a later
+ablation, not the baseline.
+
+Two commitments: **text always fires** (a false negative is unrecoverable, a
+false positive costs only latency), and **the decision is recorded** — matched
+signals, scores, and whether it fell back — so Step 6 can ask whether routing
+helped rather than treating it as a black box.
+
+### Method 1 is frozen
+
+Method 2 adds no changes to Method 1's retrieval or generation. It writes to its
+own chunk variant and its own Qdrant collections, so both indexes coexist and
+either can be rebuilt independently. `HybridRetriever` and Method 2's
+`BM25Retriever`/`DenseRetriever` deliberately duplicate a little logic rather
+than share a base class, because factoring them together would have meant
+editing Method 1 after its numbers were recorded.
+
+**See [`docs/architecture.md`](docs/architecture.md)** for the full component
+ownership table — what is shared, what belongs to each method, and the
+asymmetries that Step 6 has to control for.
+
+---
+
 ## Repository layout
 
 ```
@@ -360,10 +430,17 @@ src/mmrag/
     tokens.py         token counting + sentence segmentation
   embeddings/       local text / image / visual embedders
   stores/           Postgres + Qdrant + BM25 index adapters
-  retrieval/        hybrid retriever, RRF fusion, cross-encoder reranking
+  retrieval/        RRF fusion + reranking (shared)
+    hybrid.py         Method 1's BM25 + dense retriever
+    router.py         Method 2's query router
+    modality.py       Method 2's route/fan-out/fuse orchestrator
+    views.py          table schema vs content views
+    metadata.py       Postgres -> doc_id filters
+docs/architecture.md  which components are shared vs method-specific
   generation/       provider interface (openai | local | echo) + answerer
   methods/          the three end-to-end pipelines
-    method1_textified.py
+    method1_textified.py   (frozen)
+    method2_modality.py
   evaluation/       metrics, gold set, comparison report    (Step 6)
 notebooks/          Colab GPU notebook for Method 3 visual indexing
 ```

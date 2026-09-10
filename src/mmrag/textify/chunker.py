@@ -76,10 +76,14 @@ class Chunker:
         variant: str = "method1",
         token_counter: TokenCounter | None = None,
         embedding_model: str | None = None,
+        keep_textless_visuals: bool = False,
     ):
         self.config = config
         self.variant = variant
         self.tokens = token_counter or get_token_counter(embedding_model)
+        # Off by default, so Method 1's chunk set is unchanged. See
+        # flatten_elements for why Method 2 turns it on.
+        self.keep_textless_visuals = keep_textless_visuals
 
     # -- public API ---------------------------------------------------------
 
@@ -87,7 +91,9 @@ class Chunker:
         self, document: Document, elements: list[Element]
     ) -> tuple[list[Chunk], ChunkingReport]:
         """Chunk one document's elements, page by page."""
-        kept, flatten_report = flatten_elements(elements)
+        kept, flatten_report = flatten_elements(
+            elements, keep_textless_visuals=self.keep_textless_visuals
+        )
         report = ChunkingReport(flatten=flatten_report, token_counter=self.tokens.name)
 
         chunks: list[Chunk] = []

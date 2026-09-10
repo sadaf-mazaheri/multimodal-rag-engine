@@ -537,3 +537,87 @@ class TestChunkingReport:
 def test_is_redundant_child_needs_a_real_parent():
     orphan = _el(1, kind=ElementType.CAPTION, text="Figure 1", parent_id="missing")
     assert not is_redundant_child(orphan, {})
+
+
+class TestTextlessVisualRetention:
+    """Whether a figure with no text becomes a chunk at all.
+
+    This flag decides whether a non-textual retriever can ever reach such a
+    figure. With it off (Method 1's default) the element is dropped during
+    flattening, so no downstream index -- however capable -- can see it. Method 2
+    turns it on because its CLIP index reaches figures through their pixels.
+
+    The bug this guards against was silent: Method 2's image index was built,
+    populated and queryable, and simply contained none of the figures it existed
+    to recover.
+    """
+
+    def _figures(self):
+        blind = _el(1, kind=ElementType.DIAGRAM, text=None, order=0, figure=FigureData())
+        seen = _el(
+            2,
+            kind=ElementType.CHART,
+            text=None,
+            order=1,
+            caption="Figure 2: Revenue.",
+            figure=FigureData(),
+        )
+        return blind, seen
+
+    def test_default_drops_textless_visuals(self):
+        """Method 1's behaviour, unchanged."""
+        blind, seen = self._figures()
+        kept, report = flatten_elements([blind, seen])
+        assert [e.element_id for e in kept] == [seen.element_id]
+        assert report.invisible_figures == 1
+        assert report.kept_textless_visuals == 0
+
+    def test_opt_in_retains_them(self):
+        blind, seen = self._figures()
+        kept, report = flatten_elements([blind, seen], keep_textless_visuals=True)
+        assert {e.element_id for e in kept} == {blind.element_id, seen.element_id}
+        assert report.kept_textless_visuals == 1
+
+    def test_retained_figures_are_still_counted_as_empty(self):
+        """The measurement must not change just because the element is kept."""
+        blind, seen = self._figures()
+        _, off = flatten_elements([blind, seen])
+        _, on = flatten_elements([blind, seen], keep_textless_visuals=True)
+        assert off.invisible_figures == on.invisible_figures == 1
+
+    def test_textless_prose_is_dropped_either_way(self):
+        """Only *visuals* are worth keeping without text; empty prose is noise."""
+        empty_text = _el(1, text="   ")
+        kept, _ = flatten_elements([empty_text], keep_textless_visuals=True)
+        assert kept == []
+
+    def test_chunker_default_produces_no_textless_figure_chunk(self, chunker):
+        blind, seen = self._figures()
+        chunks, _ = chunker.chunk_document(_doc(), [blind, seen])
+        assert len([c for c in chunks if c.chunk_type is ChunkType.FIGURE]) == 1
+
+    def test_chunker_opt_in_produces_a_chunk_per_figure(self):
+        blind, seen = self._figures()
+        chunker = Chunker(
+            ChunkingConfig(),
+            token_counter=HeuristicTokenCounter(),
+            keep_textless_visuals=True,
+        )
+        chunks, _ = chunker.chunk_document(_doc(), [blind, seen])
+        figures = [c for c in chunks if c.chunk_type is ChunkType.FIGURE]
+        assert len(figures) == 2
+        assert {figures[0].chunk_id, figures[1].chunk_id} != {figures[0].chunk_id}
+
+    def test_retained_textless_figures_still_carry_provenance(self):
+        """An image-only chunk must still cite a region of a page."""
+        blind, _ = self._figures()
+        chunker = Chunker(
+            ChunkingConfig(),
+            token_counter=HeuristicTokenCounter(),
+            keep_textless_visuals=True,
+        )
+        chunks, _ = chunker.chunk_document(_doc(), [blind])
+        chunk = chunks[0]
+        assert chunk.element_ids == [blind.element_id]
+        assert chunk.page_number == blind.page_number
+        assert chunk.bbox is not None

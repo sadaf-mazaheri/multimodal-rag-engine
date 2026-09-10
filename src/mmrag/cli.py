@@ -444,15 +444,26 @@ def ingest_status() -> None:
 
 
 def _load_method(config_name: str) -> Any:
+    """Build the pipeline a config selects.
+
+    Dispatching on ``cfg.method`` rather than on the file name keeps the CLI
+    identical across methods, which is what lets the same commands benchmark
+    them against each other.
+    """
     from mmrag.config import load_experiment_config
-    from mmrag.methods import Method1Textified
+    from mmrag.methods import Method1Textified, Method2ModalityAware
 
     cfg = load_experiment_config(config_name)
-    if cfg.method != "method1":
+    builders = {
+        "method1": Method1Textified,
+        "method2": Method2ModalityAware,
+    }
+    builder = builders.get(cfg.method)
+    if builder is None:
         raise typer.BadParameter(
             f"config '{config_name}' selects {cfg.method}, which is not implemented yet"
         )
-    return cfg, Method1Textified(cfg)
+    return cfg, builder(cfg)
 
 
 @index_app.command("build")
@@ -460,7 +471,7 @@ def index_build(
     config_name: str = typer.Option("method1", "--config", "-c"),
     doc_id: list[str] = typer.Option(None, "--doc-id", "-d", help="Restrict to these documents"),
 ) -> None:
-    """Chunk the parsed corpus and build the BM25 + dense indexes."""
+    """Chunk the parsed corpus and build this method's indexes."""
     _, method = _load_method(config_name)
     report = method.build_index(doc_ids=list(doc_id) if doc_id else None)
 
@@ -476,11 +487,32 @@ def index_build(
         table.add_row(chunk_type, str(count))
     console.print(table)
 
-    console.print(
-        f"[yellow]{report.invisible_figures}[/] figures had no retrievable text at all "
-        "and are invisible to this method."
-    )
-    console.print(f"[dim]embedder: {report.embedder}[/]")
+    # Each method reports the loss that is characteristic of its own design.
+    if hasattr(report, "invisible_figures"):
+        console.print(
+            f"[yellow]{report.invisible_figures}[/] figures had no retrievable text at all "
+            "and are invisible to this method."
+        )
+        console.print(f"[dim]embedder: {report.embedder}[/]")
+    else:
+        sub = Table(title="Per-modality indexes")
+        sub.add_column("index", style="cyan")
+        sub.add_column("chunks", justify="right")
+        sub.add_row("text (bm25 + dense)", str(report.n_text_indexed))
+        sub.add_row("table (content + schema)", str(report.n_tables_indexed))
+        sub.add_row("figure (clip + text)", str(report.n_figures_indexed))
+        sub.add_row("  figure images embedded", str(report.n_figure_images_embedded))
+        console.print(sub)
+        console.print(
+            f"[green]{report.text_invisible_recoverable}[/] figures carry no text at all "
+            "but do have an image vector: content Method 1 cannot retrieve under any query."
+        )
+        if report.n_figures_without_image:
+            console.print(
+                f"[yellow]{report.n_figures_without_image}[/] figures have no image on disk "
+                "and are invisible to this method too."
+            )
+        console.print(f"[dim]embedders: {report.embedders}[/]")
 
 
 @index_app.command("status")
@@ -498,21 +530,37 @@ def index_status(
         console.print(f"[red]No index at {method.index_dir}.[/] Run 'mmrag index build'.")
         raise typer.Exit(code=1)
 
-    report = json.loads(manifest.read_text(encoding="utf-8"))["report"]
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    report = payload["report"]
     console.print(
-        f"[bold]{report['variant']}[/]: {report['n_chunks']} chunks from "
+        f"[bold]{report['variant']}[/] ({payload['method']}): {report['n_chunks']} chunks from "
         f"{report['n_documents']} documents, built in {report['elapsed_s']}s"
     )
     console.print(f"  by type: {report['by_type']}")
-    console.print(f"  figures with no text: {report['invisible_figures']}")
-    console.print(f"  embedder: {report['embedder']}")
 
-    try:
-        from mmrag.stores.qdrant import QdrantStore
+    if "invisible_figures" in report:
+        console.print(f"  figures with no text: {report['invisible_figures']}")
+        console.print(f"  embedder: {report['embedder']}")
+        collections = [report["variant"]]
+    else:
+        console.print(
+            f"  text {report['n_text_indexed']} | tables {report['n_tables_indexed']} | "
+            f"figures {report['n_figures_indexed']} "
+            f"({report['n_figure_images_embedded']} with image vectors)"
+        )
+        console.print(
+            f"  figures with no text but an image: {report['text_invisible_recoverable']}"
+        )
+        console.print(f"  embedders: {report['embedders']}")
+        collections = [f"{report['variant']}_{n}" for n in ("text", "table_schema", "image")]
 
-        console.print(f"  qdrant: {QdrantStore(report['variant']).describe()}")
-    except Exception as exc:
-        console.print(f"  [yellow]qdrant unavailable: {exc}[/]")
+    for name in collections:
+        try:
+            from mmrag.stores.qdrant import QdrantStore
+
+            console.print(f"  qdrant: {QdrantStore(name).describe()}")
+        except Exception as exc:
+            console.print(f"  [yellow]qdrant '{name}' unavailable: {exc}[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +661,22 @@ def _print_retrieval(result: Any, *, show_text: bool = False) -> None:
             " ".join(body.split()),
         )
     console.print(table)
+
+    # Method 2 routes before retrieving; showing the decision makes a bad route
+    # diagnosable from the same command that produced the results.
+    routing = getattr(result, "routing", None)
+    if routing is not None:
+        signals = "; ".join(f"{k}: {', '.join(v)}" for k, v in routing.signals.items())
+        console.print(
+            f"[cyan]routed to[/] {', '.join(m.value for m in routing.modalities)}"
+            f"  (strategy={routing.strategy}, confidence={routing.confidence:.2f}"
+            f"{', fell back' if routing.fell_back else ''})"
+        )
+        if signals:
+            console.print(f"[dim]  signals -> {signals}[/]")
+        if routing.filters.as_dict():
+            console.print(f"[dim]  filters -> {routing.filters.as_dict()}[/]")
+
     console.print(f"[dim]{result.diagnostics}[/]")
     console.print(
         "[dim]" + " ".join(f"{k}={v:.0f}ms" for k, v in result.latency_ms.items()) + "[/]"
