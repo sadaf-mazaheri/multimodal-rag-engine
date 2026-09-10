@@ -392,6 +392,33 @@ false positive costs only latency), and **the decision is recorded** — matched
 signals, scores, and whether it fell back — so Step 6 can ask whether routing
 helped rather than treating it as a black box.
 
+**What the router is worth, measured.** A 60-query audit across four strata:
+
+| Query stratum | n | fell back | routed correctly |
+|---|---:|---:|---|
+| names a table ("which table lists…") | 10 | 0 | 10/10 → exactly `text+table` |
+| names a figure ("what does the diagram show") | 10 | 0 | 10/10 → exactly `text+image` |
+| prose / conceptual | 15 | 2 | 13/15 → `text` only |
+| **natural phrasing, no modality word** | **25** | **23** | fans out to everything |
+
+The router is **exact on explicit cues and silent without them**. "What was the
+insurance underwriting result?" is a table lookup with no table word in it, so
+it fans out; the only two natural queries that scored did so on incidental
+matches ("curve", "look like").
+
+That is a deliberate position, not a defect to patch: this is a **precision
+optimisation for explicit modality cues**, and `fallback_to_all` is what carries
+natural language. The fallback is load-bearing — switch it off and 23 of those
+25 queries route to text alone, making every figure- and table-borne fact asked
+in ordinary English unreachable. More regex keywords would widen the case that
+already works while making false positives likelier; closing the gap honestly
+needs a semantic router, which stays an explicit future option.
+
+One consequence for evaluation: a question written as *"which table shows X"*
+hands the router its answer, so a query set must be stratified and the naturally
+phrased cases reported separately, or the routing result measures the phrasing
+of the questions rather than the retrieval architecture.
+
 ### Method 1 is frozen
 
 Method 2 adds no changes to Method 1's retrieval or generation. It writes to its

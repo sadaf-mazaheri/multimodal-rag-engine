@@ -27,7 +27,7 @@ simultaneously and invalidates prior measurements.
 | Config system | `config.py` | `Settings` (env) vs `ExperimentConfig` (YAML), `extends` inheritance |
 | Corpus | `corpus/` | Pinned manifest + lockfile, verifying downloader |
 | Ingestion | `ingestion/` | PDF → elements with page/bbox provenance |
-| Chunker | `textify/chunker.py` | Elements → page-bounded chunks, per `variant`. One opt-in flag added for Method 2 (see below); Method 1's output is byte-identical |
+| Chunker | `textify/chunker.py` | Elements → page-bounded chunks, per `variant`. One opt-in flag added for Method 2 (see below); Method 1's output is unchanged, and frozen by `tests/test_chunk_freeze.py` |
 | Flattening | `textify/flatten.py` | Element selection + loss reporting; `keep_textless_visuals` opt-in |
 | Token counting | `textify/tokens.py` | HF tokenizer with heuristic fallback |
 | Text embedder | `embeddings/text.py` | `bge-small-en-v1.5`, asymmetric query prefix |
@@ -89,8 +89,23 @@ Qdrant collections:
 
 `flatten_elements()` gained an opt-in `keep_textless_visuals` flag, and
 `Chunker` threads it through. **Method 1 uses the default (`False`) and its
-chunk set is byte-identical** — verified by re-chunking the corpus and comparing
-all 2,818 chunk ids against the committed index.
+chunk set is unaffected** — both methods produce an identical 2,190 text and
+446 table chunks, and Method 2's extra chunks are exactly the textless figures
+Method 1 reports as invisible.
+
+That property is now enforced rather than asserted. `tests/test_chunk_freeze.py`
+re-chunks the parsed corpus and compares it against
+`tests/baselines/method1_chunks.txt`, a frozen list of every Method 1 chunk id
+with a digest of its text, so an unintended change fails a test instead of
+quietly moving the baseline.
+
+**The baseline is a snapshot, not an invariant.** It records where Method 1
+stands today; when a change *should* move the chunk set — enabling OCR is the
+expected next one — regenerate it deliberately and review the diff:
+
+```bash
+MMRAG_UPDATE_CHUNK_BASELINE=1 python -m pytest tests/test_chunk_freeze.py
+```
 
 The flag was not optional. Flattening drops elements whose `best_text()` is
 empty, which is precisely the 147 figures Method 1 reports as invisible. Those

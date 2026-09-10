@@ -20,6 +20,34 @@ text.
 matched signals per modality, so Step 6 can ask the question that actually
 matters -- did routing help, or did it just add retrievers? -- instead of
 treating the router as a black box.
+
+What this router actually does (measured)
+-----------------------------------------
+A 60-query audit across four strata settled what the signals are worth. On
+queries that *name* a modality ("which table lists...", "what does the diagram
+show") it is exact: 10/10 table queries routed to precisely ``text+table``,
+10/10 figure queries to precisely ``text+image``, no fallbacks, no false
+positives. On queries phrased the way a user actually asks -- "What was the
+insurance underwriting result?", a table fact with no table word in it -- 23 of
+25 fell back and fanned out to everything; the only two that scored were
+incidental matches on "curve" and "look like".
+
+So this is a **precision optimisation for explicit modality cues, not a general
+query understander**, and ``fallback_to_all`` is the mechanism that carries
+natural language. That is load-bearing rather than a default worth tightening:
+with fallback off, 23 of those 25 queries route to text alone, and every
+figure- or table-borne fact asked in ordinary English becomes unreachable.
+
+Two consequences worth keeping in mind:
+
+* Adding more regex keywords does not fix the natural-language case; it widens
+  the explicit case that already works while making false positives likelier.
+  Closing the gap properly needs semantic evidence -- an LLM or embedding
+  router -- which stays a deliberate future option, not a quiet patch.
+* An evaluation whose questions are written as "which table shows X" measures
+  the phrasing of its own questions, because the router is reading a cue the
+  question-writer supplied. Query sets should be stratified so the naturally
+  phrased cases are reported separately.
 """
 
 from __future__ import annotations
