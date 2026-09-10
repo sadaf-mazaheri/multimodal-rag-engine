@@ -224,6 +224,56 @@ class TestExtractedContent:
         assert all(e.element_type.is_boilerplate for e in footers)
 
 
+class TestRegisterTables:
+    """A datasheet's register tables must survive as tables.
+
+    Each is ruled, four columns, and exactly two rows -- header plus one row of
+    data. That shape was rejected as degenerate, which left its region
+    unclaimed, so the ruling lines clustered into a phantom chart carrying no
+    text at all. Both halves of that failure are asserted here.
+    """
+
+    @pytest.fixture
+    def parsed_registers(self, register_entry, register_table_pdf, tmp_path):
+        from mmrag.config import load_experiment_config
+        from mmrag.ingestion.parser import PdfParser
+
+        config = load_experiment_config("method1").ingestion
+        parser = PdfParser(config, output_dir=tmp_path / "processed")
+        return parser.parse(register_entry, register_table_pdf)
+
+    def test_register_tables_are_detected_as_tables(self, parsed_registers):
+        tables = [e for e in parsed_registers.elements if e.element_type is ElementType.TABLE]
+        assert len(tables) == 2, f"expected both register tables, got {len(tables)}"
+        for element in tables:
+            assert element.table is not None
+            assert element.table.n_cols == 4
+            assert element.table.columns[0] == "Bits"
+            assert not element.table.is_degenerate
+
+    def test_no_phantom_chart_is_emitted_over_them(self, parsed_registers):
+        visuals = [e for e in parsed_registers.elements if e.element_type.is_visual]
+        assert not visuals, f"ruling lines became figures: {[e.element_id for e in visuals]}"
+
+    def test_their_content_is_retrievable_as_text(self, parsed_registers):
+        """The point of the fix: the cells reach an index instead of vanishing."""
+        tables = [e for e in parsed_registers.elements if e.element_type is ElementType.TABLE]
+        blob = "\n".join(e.best_text() for e in tables)
+        assert "Divider unsigned operand" in blob
+        assert "0x00000000" in blob
+        assert "RW" in blob
+
+    def test_they_are_typed_as_register_tables(self, parsed_registers):
+        """Method 2's table retriever routes on this, so the label has to land."""
+        tables = [e for e in parsed_registers.elements if e.element_type is ElementType.TABLE]
+        assert {e.table.table_type.value for e in tables} == {"register"}
+
+    def test_no_element_is_left_textless(self, parsed_registers):
+        """A page of tables must contribute nothing to the invisible-figure count."""
+        empty = [e for e in parsed_registers.elements if not e.best_text().strip()]
+        assert not empty, [(e.element_id, e.element_type.value) for e in empty]
+
+
 class TestDeterminism:
     def test_parsing_twice_produces_identical_output(
         self, synthetic_entry, synthetic_pdf, tmp_path

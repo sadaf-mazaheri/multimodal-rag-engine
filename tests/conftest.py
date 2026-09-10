@@ -109,6 +109,56 @@ def _draw_figure(page: pymupdf.Page) -> None:
     page.insert_text((x0, y0 + 225), FIGURE_CAPTION, fontsize=9)
 
 
+@pytest.fixture(scope="session")
+def register_table_pdf(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A page of register-description tables: ruled, four columns, two rows each.
+
+    The shape a datasheet uses for every register, and the shape that used to
+    be rejected as a table and re-detected as a phantom chart.
+    """
+    path = tmp_path_factory.mktemp("pdfs") / "registers.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.insert_text((72, 90), "2.3.1. SIO Registers", fontsize=16)
+
+    widths = [60.0, 260.0, 50.0, 90.0]
+    for block, name in enumerate(("DIV_UDIVIDEND", "DIV_UDIVISOR")):
+        top = 140.0 + block * 160.0
+        page.insert_text((72, top - 12), f"SIO: {name} Register", fontsize=11)
+        rows = [
+            ["Bits", "Description", "Type", "Reset"],
+            ["31:0", f"Divider unsigned operand for {name}", "RW", "0x00000000"],
+        ]
+        for row_index, values in enumerate(rows):
+            left = 72.0
+            height = 26.0 if row_index == 0 else 60.0
+            row_top = top if row_index == 0 else top + 26.0
+            for col_index, value in enumerate(values):
+                rect = pymupdf.Rect(left, row_top, left + widths[col_index], row_top + height)
+                page.draw_rect(rect, width=0.8)
+                page.insert_text((left + 4, row_top + 16), value, fontsize=9)
+                left += widths[col_index]
+
+    doc.save(path)
+    doc.close()
+    return path
+
+
+@pytest.fixture
+def register_entry(register_table_pdf: Path) -> CorpusEntry:
+    return CorpusEntry(
+        doc_id="registers",
+        title="Synthetic Datasheet",
+        url="https://example.invalid/registers.pdf",
+        publisher="Test Publisher",
+        category="technical",
+        license="CC0",
+        modality_profile=["tables", "dense_text"],
+        sha256="c" * 64,
+        size_bytes=register_table_pdf.stat().st_size,
+    )
+
+
 @pytest.fixture
 def synthetic_entry(synthetic_pdf: Path) -> CorpusEntry:
     """A manifest entry pointing at the synthetic PDF."""

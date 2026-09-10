@@ -500,6 +500,52 @@ class TestTableDegeneracy:
         table, _ = build_table_data([header, *rows])
         assert not table.is_degenerate
 
+    def test_header_plus_one_data_row_is_a_table(self):
+        """The RP2040 register-description shape: two rows, the first a header.
+
+        Promoting the header leaves one *body* row, so a size check written
+        against ``n_rows`` alone rejected every register table on the page.
+        The rejected region then had nothing claiming it, so its ruling lines
+        clustered into a phantom chart and the whole table went textless.
+        """
+        grid = [
+            ["Bits", "Description", "Type", "Reset"],
+            ["31:0", "Divider unsigned divisor", "RW", "0x00000000"],
+        ]
+        table, _ = build_table_data(grid)
+        assert table.header_rows == 1
+        assert table.n_rows == 1 and table.n_cols == 4
+        assert not table.is_degenerate
+
+    def test_size_is_judged_on_the_whole_detected_grid(self):
+        """``n_rows + header_rows`` is the grid's row count on every header path.
+
+        A single detected row is a boxed line of text even when the extractor
+        volunteers column names for it, so it stays degenerate.
+        """
+        grid = [["1", "2", "3", "4"]]
+        table, _ = build_table_data(grid, header_names=["Bits", "Description", "Type", "Reset"])
+        assert table.n_rows + table.header_rows == 1
+        assert table.is_degenerate
+
+    def test_header_with_no_data_rows_is_still_degenerate(self):
+        """Column names alone carry no data, however table-shaped they look."""
+        table, _ = build_table_data([["Bits", "Description", "Type", "Reset"]])
+        assert table.n_rows == 0
+        assert table.is_degenerate
+
+    def test_boxed_line_of_text_is_still_degenerate(self):
+        """A 1xN ruled strip must not become a table just because it has columns."""
+        table, _ = build_table_data([["Note: figures are provisional", "2023"]])
+        assert table.is_degenerate
+
+    def test_two_row_table_still_rejected_when_too_sparse(self):
+        """Relaxing the size rule must not let gridlines-from-a-chart through."""
+        grid = [["A", "B", "C", "D"], ["1", None, None, None], ["2", None, None, None]]
+        table, _ = build_table_data(grid)
+        assert table.fill_ratio < 0.3
+        assert table.is_degenerate
+
 
 class TestMarkdown:
     def test_escapes_pipes_so_a_cell_cannot_break_the_grid(self):

@@ -514,7 +514,14 @@ class TableData(BaseModel):
           single words of a sentence. Structurally they look like a perfect
           table (fill ratio 1.0), so only the cell content gives them away.
         """
-        if self.n_rows < 2 or self.n_cols < 2:
+        if self.n_cols < 2:
+            return True
+        # ``n_rows`` counts *body* rows: a promoted header lives in ``columns``
+        # and is no longer one of them. Size must therefore be judged on
+        # header + body, or a header-plus-one-data-row table is rejected --
+        # which is the exact shape of a register description table, and made
+        # every such table on a datasheet page reappear as a phantom chart.
+        if self.n_rows < 1 or self.n_rows + self.header_rows < 2:
             return True
         if self.n_cols > MAX_PLAUSIBLE_COLUMNS:
             return True
