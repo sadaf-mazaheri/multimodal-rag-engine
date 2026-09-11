@@ -16,7 +16,7 @@ The question this repo tries to answer is not "can we chat with a PDF" — it is
 | **Idea** | Flatten every modality to text, retrieve once | Keep modalities native, one retriever each, route the query | Add late-interaction retrieval over rendered page images |
 | **Text** | BM25 + dense hybrid | BM25 + dense | BM25 + dense |
 | **Tables** | → Markdown, then text retrieval | structure-aware retrieval | structure-aware retrieval |
-| **Figures** | → caption + OCR + VLM description | CLIP image embeddings | CLIP + ColQwen2 page vectors |
+| **Figures** | → caption + OCR text | CLIP image embeddings | CLIP + ColQwen2 page vectors |
 | **Fusion** | weighted RRF over 2 retrievers | weighted RRF + cross-encoder rerank | weighted RRF + rerank |
 | **Generation** | text LLM | text LLM | **VLM, with original page images attached** |
 | **Measures** | the cost of flattening | the value of preserving modality | the value of seeing the page |
@@ -201,19 +201,24 @@ mmrag ingest show arxiv_attention -t caption -g   # inspect with geometry
 mmrag ingest status                  # per-document counts from Postgres
 ```
 
-**954 pages → 16,390 elements**, mean extraction confidence **0.94**, 0.4% below 0.5:
+**954 pages → 16,005 elements**, mean extraction confidence **0.94**, 0.3% below 0.5:
 
 | | count | | count |
 |---|---:|---|---:|
-| text | 12,666 | tables | 355 |
-| headings/titles | 1,288 | charts | 196 |
-| captions | 687 | figures | 189 |
+| text | 12,230 | tables | 438 |
+| headings/titles | 1,286 | charts | 165 |
+| captions | 688 | figures | 189 |
 | headers/footers | 994 | diagrams | 15 |
 
-Table types skew financial (148) and register (100); figure types are chart (196),
+Table types skew register (171) and financial (148); figure types are chart (165),
 unknown (147), photo (42), diagram (15). **`unknown` is a deliberate answer** —
 Method 2 routes on `figure_type`, so a confidently wrong label misdirects
 retrieval while an honest abstention merely fails to help.
+
+The register-heavy table profile is recent: a degeneracy rule was rejecting any
+table whose header had been promoted out of a two-row grid, which is the exact
+shape of a register description table. Fixing it moved 83 of these out of the
+figure counts and into the table counts, where they belong.
 
 Parsing runs in two passes per document, and the structure is load-bearing: a
 single page cannot distinguish a running header from a section heading, nor a
@@ -279,16 +284,26 @@ answer whose citations resolve back to a page and bounding box.
 
 ### What the baseline can't see
 
-Building the index over the full corpus produces **2,818 chunks** (2,202 text,
-363 table, 253 figure) from 954 pages — and reports the headline measurement:
+Building the index over the full corpus produces **2,968 chunks** (2,190 text,
+446 table, 332 figure) from 954 pages — and reports the headline measurement:
 
-> **147 figures have no retrievable text at all.**
+> **37 figures have no retrievable text at all.**
 
-Those are charts and diagrams where nothing textual was ever extracted — no
-caption, no OCR, no VLM description. They exist in the corpus and are
-*structurally unreachable* for this architecture. That number is the mechanism
-behind any deficit Method 3 later makes up, and it is why `FlattenReport` counts
-and attributes losses instead of silently dropping them.
+Those are figures where nothing textual could be extracted — no caption, and
+nothing OCR could recover. They exist in the corpus and are *structurally
+unreachable* for this architecture. That number is the mechanism behind any
+deficit Method 3 later makes up, and it is why `FlattenReport` counts and
+attributes losses instead of silently dropping them.
+
+**Getting to 37 took two fixes, and both mattered more than the retrieval
+work.** It began at 147. A table-degeneracy bug was emitting register
+description tables as textless "charts"; fixing it took the figure to 118 and
+moved 83 tables back where they belonged. Implementing the OCR pass then
+recovered text from 81 more. Every one of those 164 figures was text that the
+textified baseline should always have had — so had the comparison been run
+first, Method 2's image retriever would have been credited for recovering
+content that belonged to Method 1 by right. An ingestion gap masquerading as an
+architectural result is the failure mode this project most needed to avoid.
 
 ### Design decisions
 
@@ -361,14 +376,21 @@ mmrag query "What does the architecture diagram show?" -c method2 --provider ech
 
 ### What Method 2 can do that Method 1 structurally cannot
 
-Method 1 reports **147 of 400 figures with no retrievable text**: no caption, no
-OCR, no description. No text index can reach them under any query.
+Method 1 reports **37 of 369 figures with no retrievable text**: no caption, and
+nothing OCR could recover. No text index can reach them under any query.
 
-**All 147 have a cropped image on disk.** CLIP puts images and text in one
-space, so a text query scores directly against the pixels with no textual
-intermediary. That is the concrete mechanism behind any advantage Method 2 shows
-on figure questions, and the index build reports it as
-`text_invisible_recoverable`.
+**All 37 have a cropped image on disk.** CLIP puts images and text in one space,
+so a text query scores directly against the pixels with no textual intermediary.
+That is the concrete mechanism behind any advantage Method 2 shows on figure
+questions, and the index build reports it as `text_invisible_recoverable`.
+
+**37 is the honest version of a number that started at 147**, and the difference
+is the point. The original 147 mixed three populations: register tables the
+parser had misfiled as charts, text baked into images that OCR can read, and
+genuinely image-only content. Only the third is a modality gap. Fixing the first
+two before measuring anything is what keeps the remaining 37 — mostly protein
+structure renders and photographs — an architectural claim rather than an
+artefact of incomplete ingestion.
 
 ### Two views of a table, not one
 

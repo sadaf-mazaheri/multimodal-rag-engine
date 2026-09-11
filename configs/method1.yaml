@@ -3,7 +3,7 @@ extends: default
 name: method1_textified
 description: >
   Textified multimodal RAG. Every modality is flattened into text -- tables to
-  Markdown, figures to caption + OCR + VLM description -- and then retrieved by
+  Markdown, figures to caption + OCR text -- and then retrieved by
   a single hybrid BM25 + dense pipeline. Establishes the baseline and, by
   comparison against Methods 2 and 3, quantifies how much is lost in the
   flattening.

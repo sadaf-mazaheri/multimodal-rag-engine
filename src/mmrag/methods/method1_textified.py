@@ -1,8 +1,8 @@
 """Method 1: Textified multimodal RAG.
 
 Every modality is flattened into text -- tables to Markdown, figures to caption
-plus OCR plus VLM description -- and then retrieved by a single hybrid BM25 +
-dense pipeline. It is the simplest thing that could work, and that is the point:
+plus recovered OCR text -- and then retrieved by a single hybrid BM25 + dense
+pipeline. It is the simplest thing that could work, and that is the point:
 it is the baseline against which Methods 2 and 3 are measured, so the *cost* of
 the flattening is the number this method exists to produce.
 

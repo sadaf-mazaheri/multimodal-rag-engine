@@ -99,16 +99,19 @@ re-chunks the parsed corpus and compares it against
 with a digest of its text, so an unintended change fails a test instead of
 quietly moving the baseline.
 
-**The baseline is a snapshot, not an invariant.** It records where Method 1
-stands today; when a change *should* move the chunk set — enabling OCR is the
-expected next one — regenerate it deliberately and review the diff:
+**The baseline is a snapshot, not an invariant.** It currently records the
+post-OCR state, 2,968 chunks. It has already been regenerated deliberately
+twice: once for the table-degeneracy fix (2,818 → 2,887) and once for the OCR
+pass (2,887 → 2,968). When a change *should* move the chunk set again,
+regenerate and review the diff rather than weakening the test:
 
 ```bash
 MMRAG_UPDATE_CHUNK_BASELINE=1 python -m pytest tests/test_chunk_freeze.py
 ```
 
 The flag was not optional. Flattening drops elements whose `best_text()` is
-empty, which is precisely the 147 figures Method 1 reports as invisible. Those
+empty, which at the time was the 147 figures Method 1 then reported as invisible
+(the table fix and the OCR pass have since brought that to 37). Those
 elements therefore never became chunks — so Method 2's CLIP index was built,
 populated, queryable, and contained **none of the figures it exists to
 recover**. The image retriever returned only figures that already had captions,
@@ -192,3 +195,46 @@ not find it. What OCR did is recorded beside it in `figure.ocr_text`,
 `figure.ocr_confidence` and `element.metadata["ocr"]`, and the per-document
 `stats.ocr` block records the backend and version, so "OCR ran and found
 nothing" is distinguishable from "OCR never ran".
+
+Known OCR quality limits, measured on the corpus: recovered text is missing
+intra-word spaces in about 1.6% of tokens (`Centralgovernmentsecurities`), which
+costs BM25 exact-term matches; chart axis labels arrive unordered, so they add
+lexical hooks rather than structured meaning; and the Transformer paper's
+attention heatmaps OCR to token soup that clears the alphanumeric gate. Median
+per-figure confidence is 0.985.
+
+---
+
+## Known issues
+
+Open defects, deliberately not fixed yet. Both surface as failing tests in
+`tests/test_method2.py` rather than as xfails, so they stay visible.
+
+**1. `MetadataResolver` narrows on a single common word.** `resolve()` uses
+`min_terms=1`, so "Transformer model architecture diagram" matches
+`nvidia_ampere_wp` on the word *architecture* alone — that document's title is
+"NVIDIA A100 Tensor Core GPU **Architecture** Whitepaper" — and every other
+retriever is then restricted to it. The Transformer paper's own facet terms are
+only `{arxiv, attention, all, you, need}`, since neither its `doc_id` nor its
+title contains "transformer". Fails
+`TestRetrieval::test_finds_the_transformer_architecture_figure` and
+`TestAnswering::test_produces_an_answer_with_resolvable_citations`.
+
+This is also an asymmetry: Method 2 gets query→`doc_id` narrowing that Method 1
+has no counterpart for, and it is on by default (`use_metadata=True`), so a
+head-to-head comparison currently mixes it in. `retrieve(use_metadata=False)`
+exists to ablate it.
+
+**2. Figures cannot reach the fused top-k on mixed queries.** A text chunk is
+voted for by *two* retrievers (`bm25` and `dense`, weight 1.0 each) while a
+figure gets *one* (`image`, weight 0.7), so RRF structurally favours text: two
+contributions of `1.0/(k+rank)` beat one of `0.7/(k+rank)` almost regardless of
+rank. Measured with the metadata resolver disabled, the top 10 for "Transformer
+model architecture diagram" is entirely text with reranking both **on and off**,
+while forcing `Modality.IMAGE` puts the correct figure at **rank 1**. So the
+figure is retrievable and fusion is what buries it.
+
+This one bears directly on the Method 2 premise: if the image retriever rarely
+reaches the final top-k except on explicitly visual queries, the modality-aware
+advantage is smaller than the index-build numbers suggest. Worth resolving
+before any Method 1 vs Method 2 result is published.
