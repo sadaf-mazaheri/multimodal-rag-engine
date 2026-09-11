@@ -12,6 +12,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from mmrag import __version__
@@ -32,10 +33,16 @@ ingest_app = typer.Typer(
     no_args_is_help=True,
 )
 index_app = typer.Typer(help="Build and inspect retrieval indexes.", no_args_is_help=True)
+eval_app = typer.Typer(
+    help="Score retrieval against the gold set and compare methods.", no_args_is_help=True
+)
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(config_app, name="config")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(index_app, name="index")
+app.add_typer(eval_app, name="eval")
+
+DEFAULT_GOLD = "data/eval/gold/v1.yaml"
 
 console = Console()
 
@@ -793,6 +800,172 @@ def doctor() -> None:
         row("colpali-engine", None, "Method 3 visual index must be built out-of-band")
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# eval
+# ---------------------------------------------------------------------------
+
+
+def _load_gold(path: str):
+    from mmrag.evaluation import GoldSet
+
+    try:
+        return GoldSet.load(path)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(f"no gold set at {path}") from exc
+    except Exception as exc:
+        console.print(f"[red]{path} is not a valid gold set:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+@eval_app.command("validate")
+def eval_validate(
+    gold_path: str = typer.Option(DEFAULT_GOLD, "--gold"),
+    config_name: str = typer.Option("method1", "--config", "-c"),
+) -> None:
+    """Check every gold evidence entry resolves against a built index.
+
+    Run this after any re-ingest. A gold set whose pages have moved otherwise
+    reports itself as a retrieval *failure*, and a method looks broken when in
+    fact the labels drifted.
+    """
+    from mmrag.evaluation import validate_against_chunks
+
+    gold = _load_gold(gold_path)
+    _, method = _load_method(config_name)
+    chunks = list(method.chunks.values())
+
+    counts = gold.counts()
+    console.print(
+        f"[cyan]{gold_path}[/] v{gold.version}: {len(gold.queries)} queries, "
+        f"{sum(len(q.evidence) for q in gold.queries)} evidence entries"
+    )
+    console.print(f"[dim]  stratum: {counts['stratum']}[/]")
+    console.print(f"[dim]  requires: {counts['requires']}[/]")
+
+    problems = validate_against_chunks(gold, chunks)
+    if not problems:
+        console.print(
+            f"[green]All evidence resolves[/] against '{config_name}' ({len(chunks)} chunks)."
+        )
+        flagged = [
+            q.id for q in gold.queries
+            if any("NEEDS REVIEW" in (e.note or "") for e in q.evidence)
+        ]
+        if flagged:
+            console.print(f"[yellow]{len(flagged)} entries marked NEEDS REVIEW:[/] {flagged}")
+        return
+
+    console.print(f"[red]{len(problems)} unresolvable evidence entries:[/]")
+    table = Table(show_lines=False)
+    table.add_column("query", style="cyan")
+    table.add_column("problem")
+    table.add_column("detail", overflow="fold")
+    for problem in problems:
+        table.add_row(problem.query_id, problem.kind, problem.detail)
+    console.print(table)
+    raise typer.Exit(code=1)
+
+
+@eval_app.command("run")
+def eval_run(
+    config_name: str = typer.Option("method1", "--config", "-c"),
+    gold_path: str = typer.Option(DEFAULT_GOLD, "--gold"),
+    tag: str | None = typer.Option(None, "--tag", help="Label for this run in reports"),
+    no_rerank: bool = typer.Option(False, "--no-rerank", help="Ablate the cross-encoder"),
+    no_metadata: bool = typer.Option(
+        False, "--no-metadata", help="Ablate Method 2's document resolver"
+    ),
+    out_dir: str = typer.Option("data/eval/runs", "--out"),
+) -> None:
+    """Score one method over the gold set and save the run.
+
+    Ablations are applied here rather than by editing a config file, so both
+    arms of a comparison come from the same committed configuration.
+    """
+    from mmrag.config import load_experiment_config
+    from mmrag.evaluation.report import render, save_run
+    from mmrag.evaluation.retrieval_eval import run_evaluation
+    from mmrag.methods import Method1Textified, Method2ModalityAware
+
+    gold = _load_gold(gold_path)
+    config = load_experiment_config(config_name)
+
+    overrides: dict[str, Any] = {}
+    if no_rerank:
+        config.retrieval.rerank_enabled = False
+        overrides["rerank_enabled"] = False
+    if no_metadata:
+        overrides["use_metadata"] = False
+
+    builders = {"method1": Method1Textified, "method2": Method2ModalityAware}
+    builder = builders.get(config.method)
+    if builder is None:
+        raise typer.BadParameter(f"{config.method} is not implemented yet")
+    method = builder(config)
+
+    label = tag or ("no-rerank" if no_rerank else None)
+    console.print(
+        f"Evaluating [cyan]{config.method}[/] over {len(gold.queries)} queries"
+        + (f" [yellow](overrides: {overrides})[/]" if overrides else "")
+    )
+    if config.retrieval.rerank_enabled:
+        console.print("[dim]  reranking is on; on CPU this is ~18s per query[/]")
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("retrieving", total=len(gold.queries))
+
+        def advance(index: int, total: int, result: Any) -> None:
+            progress.update(
+                task, completed=index, description=f"[dim]{result.query_id}[/]"
+            )
+
+        run = run_evaluation(
+            method,
+            gold,
+            config,
+            config_name=config_name,
+            tag=label,
+            use_metadata=False if no_metadata else None,
+            overrides=overrides,
+            on_query=advance,
+        )
+
+    stamp = run.started_at.replace(":", "").replace("-", "")
+    suffix = f"_{label}" if label else ""
+    path = save_run(run, Path(out_dir) / f"{stamp}_{run.method}{suffix}.json")
+
+    render([run], console=console)
+    console.print(f"\n[green]saved[/] {path}")
+
+
+@eval_app.command("compare")
+def eval_compare(
+    runs: list[str] = typer.Argument(..., help="Run JSON files; the first is the baseline"),
+    markdown: bool = typer.Option(False, "--markdown", help="Emit the headline table as Markdown"),
+) -> None:
+    """Compare saved runs. The first is treated as the baseline for deltas."""
+    from mmrag.evaluation.report import load_run, render, to_markdown
+
+    loaded = []
+    for path in runs:
+        try:
+            loaded.append(load_run(path))
+        except FileNotFoundError as exc:
+            raise typer.BadParameter(f"no run file at {path}") from exc
+
+    render(loaded, console=console)
+    if markdown:
+        console.print("\n[dim]-- Markdown --[/]")
+        print(to_markdown(loaded))
 
 
 if __name__ == "__main__":  # pragma: no cover
