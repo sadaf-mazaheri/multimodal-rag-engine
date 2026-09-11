@@ -152,12 +152,81 @@ Both methods:
 They differ in exactly three places: how chunks are partitioned into indexes,
 whether a router selects among those indexes, and which retrievers score them.
 
-One asymmetry is worth stating plainly: **Method 2 enables the cross-encoder
-reranker and Method 1 does not** (`retrieval.rerank_enabled`). That is a
-deliberate part of the Method 2 design rather than an oversight, but it means a
-head-to-head result mixes the modality-aware effect with the reranker effect.
-Step 6 should report the reranker-off ablation alongside, and
-`force_modalities` exists so the routing effect can be isolated the same way.
+**Both methods now rerank with the same model and the same `rerank_top_n`.**
+Method 1 previously did not, which made the reranker a second difference
+between them: a head-to-head result mixed the modality-aware effect with the
+reranker effect and neither was attributable. Holding it constant costs the
+baseline some of its "simplest thing that could work" character and buys a
+comparison where retrieval is the only variable. `force_modalities` and
+`use_metadata=False` exist so the routing and metadata effects can be isolated
+the same way.
+
+The cost is real and worth stating: on CPU the cross-encoder is ~17.6 s per
+query over a 25-candidate pool, against ~150–280 ms for retrieval itself. Both
+methods pay it equally, so the comparison is unaffected, but neither is
+interactive on this hardware without a GPU.
+
+---
+
+## Two-stage fusion
+
+Method 2 fuses in two stages, because RRF is additive across ranked lists and
+the modalities did not supply equal numbers of them.
+
+```
+bm25 ─┐
+      ├─ RRF ─→ text ─┐
+dense ┘               │
+table ────────────────┼─ weighted RRF ─→ modality-floored pool ─→ rerank
+image ────────────────┘
+```
+
+`TableRetriever` and `ImageRetriever` already fused their own two signals
+internally, but text's `bm25` and `dense` reached the cross-modality stage
+separately — so text had two votes and every other modality one. The effect was
+a ceiling, not a tendency:
+
+| modality | lists | weight | best achievable score |
+|---|---:|---:|---:|
+| text | 2 | 1.0 | 0.032787 |
+| table | 1 | 1.0 | 0.016393 |
+| image | 1 | 0.7 | **0.011475** |
+
+A 2.86× advantage before a single document was scored. Measured on "Transformer
+model architecture diagram", the best figure landed at fused rank 44 with a
+score of exactly `0.7/(60+1)` — its ceiling — behind 43 text chunks.
+
+`_modality_weights` resolves a weight per modality from a config written
+against retriever names, so `bm25: 1.0, dense: 1.0` becomes `text: 1.0` rather
+than 2.0. An explicit `text:` key overrides it.
+
+**Equalising the votes is necessary but not sufficient.** RRF ranks by position
+and cannot *abstain*: a retriever contributes its rank-1 candidate at full
+strength whether or not it holds anything relevant, and the router fans out on
+42% of natural queries. Measured over 9 corpus-grounded queries, two-stage
+fusion alone surfaced **0/5** figure answers and dropped text purity to 67% by
+letting tables in instead. Raising the image weight to 2.0 instead gave 5/5
+figures but put 6–7 figures in the top 10 of *"What is positional encoding?"*
+and broke the table query — a see-saw, not a fix.
+
+So the second stage is a **modality floor on the rerank pool**
+(`retrieval.rerank_pool_per_modality`, default 8). Every fired modality is
+guaranteed candidates in the pool the cross-encoder sees; the cross-encoder then
+decides the order, and *can* abstain because it reads query and passage
+together. The floor governs membership, never position.
+
+| | figure hit | mean rank | table hit | text purity |
+|---|---:|---:|---:|---:|
+| before | 0/5 | — | 1/1 | 100% |
+| **after** | **4/5** | 4.8 | **1/1** | 80% |
+
+Pool size stays at exactly `rerank_top_n`, so reranking costs no more than
+before. The floor is well-behaved between 4 and 8; at 12 the pool outgrows
+`rerank_top_n` and quality drops.
+
+**Without a reranker there is no floor.** A quota with no arbiter would promote
+evidence nothing had vouched for, so `rerank_enabled: false` falls back to plain
+cross-modality fusion truncated to `top_k`.
 
 ---
 
@@ -225,16 +294,14 @@ has no counterpart for, and it is on by default (`use_metadata=True`), so a
 head-to-head comparison currently mixes it in. `retrieve(use_metadata=False)`
 exists to ablate it.
 
-**2. Figures cannot reach the fused top-k on mixed queries.** A text chunk is
-voted for by *two* retrievers (`bm25` and `dense`, weight 1.0 each) while a
-figure gets *one* (`image`, weight 0.7), so RRF structurally favours text: two
-contributions of `1.0/(k+rank)` beat one of `0.7/(k+rank)` almost regardless of
-rank. Measured with the metadata resolver disabled, the top 10 for "Transformer
-model architecture diagram" is entirely text with reranking both **on and off**,
-while forcing `Modality.IMAGE` puts the correct figure at **rank 1**. So the
-figure is retrievable and fusion is what buries it.
+**2. Figures cannot reach the fused top-k on mixed queries.** *Resolved* — see
+[Two-stage fusion](#two-stage-fusion). Figure answers went from 0/5 to 4/5 on
+the sanity set while the table answer held and text purity stayed at 80%.
 
-This one bears directly on the Method 2 premise: if the image retriever rarely
-reaches the final top-k except on explicitly visual queries, the modality-aware
-advantage is smaller than the index-build numbers suggest. Worth resolving
-before any Method 1 vs Method 2 result is published.
+The one remaining miss is worth recording, because it is a *content* problem
+rather than a fusion one: "How much warming is projected under the high
+emissions scenario?" puts 8 figures in the pool, including the right IPCC
+chart, and the cross-encoder still scores it below the prose. That chart's OCR
+text is thin, so there is little for a text-pair model to match on. Nothing in
+the retrieval path can fix it; it is an argument for Method 3 rather than
+against the fusion change.

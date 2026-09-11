@@ -25,4 +25,10 @@ retrieval:
   fusion_weights:
     bm25: 1.0
     dense: 1.0
-  rerank_enabled: false
+  # Both methods rerank with the same model and pool size. Method 1 previously
+  # did not, which meant a head-to-head result mixed the modality-aware effect
+  # with the reranker effect and neither could be attributed. Turning it on
+  # here costs the baseline its "simplest thing that could work" purity, and
+  # buys a comparison where retrieval is the only thing that differs.
+  rerank_enabled: true
+  rerank_top_n: 25

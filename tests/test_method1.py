@@ -137,9 +137,19 @@ class TestRetrieval:
         assert {h.chunk.doc_id for h in result.results} == {"arxiv_attention"}
 
     def test_component_ranks_are_recorded_for_ablation(self, method):
+        """Which retrievers found a hit, and where fusion had put it.
+
+        ``fused`` appears because reranking is enabled: the reranker records the
+        pre-rerank position so its own effect stays measurable. Without it a
+        reranker that reorders nothing and one that fixes everything look
+        identical downstream.
+        """
         result = method.retrieve("self attention mechanism", top_k=5)
         assert all(h.component_ranks for h in result.results)
-        assert all(set(h.component_ranks) <= {"bm25", "dense"} for h in result.results)
+        assert all(
+            set(h.component_ranks) <= {"bm25", "dense", "fused"} for h in result.results
+        )
+        assert all("fused" in h.component_ranks for h in result.results)
 
     def test_latency_is_broken_down_by_stage(self, method):
         result = method.retrieve("attention", top_k=5)

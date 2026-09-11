@@ -6,8 +6,20 @@ it directly -- far more accurate, and far too slow to run over a whole corpus.
 Hence the standard arrangement used here: cheap retrieval produces a candidate
 pool, the cross-encoder reorders only that pool.
 
-Off by default for Method 1 (``retrieval.rerank_enabled``), so the baseline
-measures the hybrid itself. Methods 2 and 3 enable it.
+Every method enables it with the same model and the same ``rerank_top_n``
+(``retrieval.rerank_enabled``). Method 1 originally did not, which made the
+reranker a second difference between the methods: a head-to-head result mixed
+the modality-aware effect with the reranker effect, and neither was
+attributable. Holding it constant costs the baseline some of its "simplest
+thing that could work" character and buys a comparison in which retrieval is
+the only variable.
+
+For Method 2 the cross-encoder does a second job. RRF ranks by position and
+cannot abstain, so an irrelevant modality still contributes its best candidate
+at full strength; the cross-encoder reads the query and passage together and
+can score that candidate down. It is therefore the arbiter across modalities,
+which is why Method 2 guarantees every fired modality a floor in the pool it
+sees -- ``retrieval.rerank_pool_per_modality``.
 """
 
 from __future__ import annotations

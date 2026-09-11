@@ -17,7 +17,7 @@ The question this repo tries to answer is not "can we chat with a PDF" — it is
 | **Text** | BM25 + dense hybrid | BM25 + dense | BM25 + dense |
 | **Tables** | → Markdown, then text retrieval | structure-aware retrieval | structure-aware retrieval |
 | **Figures** | → caption + OCR text | CLIP image embeddings | CLIP + ColQwen2 page vectors |
-| **Fusion** | weighted RRF over 2 retrievers | weighted RRF + cross-encoder rerank | weighted RRF + rerank |
+| **Fusion** | RRF over 2 retrievers + rerank | two-stage RRF + modality-floored rerank | two-stage RRF + rerank |
 | **Generation** | text LLM | text LLM | **VLM, with original page images attached** |
 | **Measures** | the cost of flattening | the value of preserving modality | the value of seeing the page |
 
@@ -403,6 +403,43 @@ to match. Method 2 indexes tables twice:
 - **content view** — the cells. Long and literal; BM25 handles it.
 
 Both point at the same `chunk_id`, so provenance is unchanged.
+
+### Fusion happens in two stages
+
+Each modality's own signals are fused first — `bm25 + dense → text`,
+`content + schema → table`, `CLIP + figure text → image` — and only then are the
+three modalities fused together.
+
+The reason is arithmetic. RRF adds a contribution per ranked list, so a modality
+supplying two lists got twice the votes. Table and image already fused
+internally; text did not, which handed it a **2.86× score ceiling** over image
+before anything was scored. On *"Transformer model architecture diagram"* the
+best figure landed at fused rank 44 — at exactly its ceiling of `0.7/(60+1)`,
+behind 43 text chunks — despite its own retriever ranking it **first**.
+
+Equalising the votes is necessary but not sufficient: RRF ranks by position and
+cannot *abstain*, so an irrelevant modality still contributes its best candidate
+at full strength. Two-stage fusion alone surfaced 0/5 figure answers and let
+tables crowd in instead; simply raising the image weight gave 5/5 figures but
+flooded prose queries and broke the table query.
+
+So the cross-encoder arbitrates, and every fired modality is guaranteed a floor
+in the pool it sees (`rerank_pool_per_modality`, default 8). It can abstain,
+because it reads query and passage together.
+
+| | figure answers found | table | text purity |
+|---|---:|---:|---:|
+| before | 0/5 | 1/1 | 100% |
+| **after** | **4/5** | **1/1** | 80% |
+
+The pool stays at `rerank_top_n`, so this costs no extra reranking. With
+reranking disabled there is no floor — a quota with no arbiter would promote
+evidence nothing vouched for — and fusion falls back to plain `top_k`.
+
+**Both methods now rerank identically**, so a head-to-head no longer mixes the
+modality-aware effect with the reranker effect. On CPU the cross-encoder costs
+~17.6 s per query against ~150–280 ms for retrieval; both methods pay it, but
+neither is interactive without a GPU.
 
 ### Routing
 

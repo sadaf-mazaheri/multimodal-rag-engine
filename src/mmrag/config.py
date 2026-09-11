@@ -217,12 +217,20 @@ class RetrievalConfig(BaseModel):
     # RRF constant. 60 is the value from Cormack et al. and is a sane default;
     # lower values weight the top ranks more aggressively.
     rrf_k: int = Field(default=60, ge=1)
-    # Per-retriever weights applied on top of RRF. Keys are retriever names.
+    # Weights applied on top of RRF. Keys may be retriever names ("bm25") or,
+    # for Method 2's two-stage fusion, modality names ("text"). A modality with
+    # no explicit key inherits the strongest weight among its own retrievers.
     fusion_weights: dict[str, float] = Field(default_factory=dict)
 
     rerank_enabled: bool = False
     rerank_model: str = "BAAI/bge-reranker-base"
     rerank_top_n: int = Field(default=25, ge=1)
+    # Candidates guaranteed a place in the rerank pool per fired modality.
+    # RRF is scale-free and cannot abstain, so without a floor the modality
+    # with the most retrievers crowds the pool out and the cross-encoder never
+    # sees the others. Only meaningful when reranking is enabled: it decides
+    # what gets *considered*, never the final order.
+    rerank_pool_per_modality: int = Field(default=8, ge=0)
 
     @model_validator(mode="after")
     def _candidates_cover_top_k(self) -> RetrievalConfig:
