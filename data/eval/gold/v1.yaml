@@ -1,30 +1,38 @@
-# Gold query set, version 1 -- SEED. Not yet the full ~40 queries.
+# Gold query set, version 1.
 #
 # Hand-authored and reviewed, like configs/corpus.yaml: never rewritten by
 # tooling, so these comments and per-entry justifications survive.
 #
 # Evidence is (doc_id, page, modality). Not chunk_id -- those are namespaced per
-# method and hashed over content, so the two methods have different ids for the
+# method and hashed over content, so the two methods hold different ids for the
 # same evidence and could not be compared. Not element_id -- those encode a
 # per-type-per-page ordinal that shifts whenever detection changes, and this
 # corpus has been re-ingested three times already.
 #
-# Every `note` records how the page was verified, so a reviewer can check an
-# entry without opening the PDF. Entries below were confirmed against the built
-# index by matching chunk text, not from memory.
+# Two axes, kept separate on purpose:
+#   stratum   how the question is PHRASED  (text | table | figure | natural)
+#   requires  where the answer LIVES       (text | table | figure)
+# A naturally phrased question about a table is stratum=natural, requires=table.
+# The router audit found explicit modality words hand the router its answer, so
+# `natural` is the honest slice and must be reported separately.
+#
+# Every `note` records how the page was verified. Entries confirmed by matching
+# chunk text in the built index are stated plainly; anything inferred from a
+# section heading, or where an adjacent page could equally qualify, is marked
+# NEEDS REVIEW.
 #
 # Known bias, applying equally to both methods: page-level evidence slightly
-# over-credits. A chunk from the right page and modality counts as a hit even
-# if it is not the exact sentence carrying the answer. A (doc, page, modality)
-# key selects 2.09 chunks on average, 1.36 for figures.
+# over-credits. A chunk from the right page and modality counts as a hit even if
+# it is not the exact sentence carrying the answer. A (doc, page, modality) key
+# selects 2.09 chunks on average, 1.36 for figures.
 #
 # Validate with:  mmrag eval validate
 
 version: 1
 description: >
-  Seed slice of the retrieval gold set: two queries per stratum, spanning the
-  text/table/figure modalities and both explicit and natural phrasing. Extended
-  to ~40 queries once the structure is approved.
+  Retrieval gold set for the Method 1 vs Method 2 comparison. 40 queries across
+  four phrasing strata over all 14 corpus documents, with evidence at
+  (doc_id, page, modality) granularity.
 
 # SHA-256 of configs/corpus.lock.yaml when this set was authored. Page numbers
 # are only meaningful against the corpus they were read from.
@@ -32,8 +40,9 @@ corpus_lock_sha256: null
 
 queries:
 
-  # --- stratum: text ------------------------------------------------------
-  # Prose questions. The router should keep these to the text retrievers.
+  # =======================================================================
+  # stratum: text -- prose questions, answer lives in prose (10)
+  # =======================================================================
 
   - id: q001
     query: What is positional encoding and why is it needed?
@@ -44,10 +53,8 @@ queries:
         page: 6
         modality: text
         note: >
-          Section 3.5 "Positional Encoding", which states the sine/cosine
-          formulation. Confirmed: the p6 text chunk carries the section heading
-          and the PE( formula.
-    notes: Plain definitional question; no modality word in the query.
+          Section 3.5 "Positional Encoding". Confirmed: the p6 text chunk
+          carries the section heading and the PE( sine/cosine formulation.
 
   - id: q002
     query: Why does ColPali use late interaction instead of a single dense vector?
@@ -55,19 +62,133 @@ queries:
     requires: text
     evidence:
       - doc_id: arxiv_colpali
+        page: 3
+        modality: text
+        note: >
+          Confirmed: p3 text chunk discusses late interaction against
+          bi-encoder query matching, referring to section E.
+      - doc_id: arxiv_colpali
+        page: 1
+        modality: text
+        note: >
+          Abstract also states the late-interaction claim. NEEDS REVIEW --
+          included as a second acceptable page; drop if evidence should be the
+          single most specific page.
+
+  - id: q003
+    query: How does retrieval-augmented generation combine parametric and non-parametric memory?
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: arxiv_rag
+        page: 1
+        modality: text
+        note: >
+          Confirmed: p1 text chunk describes combining a pre-trained
+          seq2seq (parametric) with a retrieved passage index
+          (non-parametric), including the per-token variant.
+
+  - id: q004
+    query: What is systems engineering according to the NASA handbook?
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: nasa_seh
+        page: 13
+        modality: text
+        note: >
+          Confirmed: p13 text chunk in section "2.0 Fundamentals of Systems
+          Engineering" defines SE as balancing design against opposing
+          interests and conflicting constraints.
+
+  - id: q005
+    query: Why is the RP2040 chip called RP2040?
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: rp2040_datasheet
+        page: 9
+        modality: text
+        note: >
+          Confirmed: p9 text chunk in "Chapter 1. Introduction" contains the
+          heading "1.1. Why is the chip called RP2040?" and the post-fix
+          numeral explanation.
+
+  - id: q006
+    query: Explain how insurance float contributes to Berkshire's growth.
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: berkshire_ar_2023
+        page: 16
+        modality: text
+        note: >
+          Confirmed: p16 text chunk states property-casualty insurance
+          "provides the core of Berkshire's well-being and growth" and
+          discusses loss payments and inflation.
+
+  - id: q007
+    query: What does the IPCC say about human influence on the climate system?
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: ipcc_ar6_wg1_spm
         page: 4
         modality: text
         note: >
-          Method section contrasting late interaction with single-vector
-          retrieval. NEEDS REVIEW -- page located by section heading, not by a
-          verbatim sentence match.
-    notes: Conceptual "why" question; the router's _is_clearly_textual should fire.
+          Confirmed: p4 text chunk in "A. The Current State of the Climate"
+          carries the headline attribution statement and its confidence
+          qualifier.
 
-  # --- stratum: table -----------------------------------------------------
-  # The query names a table explicitly, so the router gets a free signal.
-  # Reported separately from `natural` for exactly that reason.
+  - id: q008
+    query: What problem does TAPAS address in table parsing?
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: arxiv_tapas
+        page: 1
+        modality: text
+        note: >
+          Confirmed: p1 text chunk introduces scaling input length and
+          encoding structured inputs for standard Transformer architectures.
+          NEEDS REVIEW -- the retrieved chunk's section is unlabelled, so the
+          page was identified by content rather than by heading.
 
-  - id: q003
+  - id: q009
+    query: Summarise the situation reported in the first WHO novel coronavirus report.
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: who_covid_sitrep_001
+        page: 1
+        modality: text
+        note: >
+          Confirmed: p1 text chunk under "21 JANUARY 2020" reports the first
+          Republic of Korea case and the Guangdong/Beijing/Shanghai breakdown.
+
+  - id: q010
+    query: What does the A100 streaming multiprocessor improve on compared with Volta and Turing?
+    stratum: text
+    requires: text
+    evidence:
+      - doc_id: nvidia_ampere_wp
+        page: 20
+        modality: text
+        note: >
+          Confirmed: p20 text chunk under "A100 SM Architecture" states the new
+          A100 SM "significantly increases performance, builds upon features
+          introduced in both the Volta and Turing SM architectures".
+    notes: >
+      Query rewritten during verification. It originally asked about "design
+      goals of the A100 architecture", which p20 does not answer -- that page
+      is specifically about the SM. Recorded because the mismatch was only
+      visible by reading the page's chunks.
+
+  # =======================================================================
+  # stratum: table -- query names a table explicitly (8)
+  # =======================================================================
+
+  - id: q011
     query: Which table reports the BLEU scores for the Transformer model variations?
     stratum: table
     requires: table
@@ -76,11 +197,10 @@ queries:
         page: 9
         modality: table
         note: >
-          Table 3 "Variations on the Transformer architecture", section 6.2
-          Model Variations. Confirmed: the p9 table chunk matches /BLEU/.
-    notes: Explicit "which table" phrasing.
+          Table 3 "Variations on the Transformer architecture", section 6.2.
+          Confirmed: the p9 table chunk matches /BLEU/.
 
-  - id: q004
+  - id: q012
     query: Which table lists confirmed novel coronavirus cases by country?
     stratum: table
     requires: table
@@ -91,12 +211,87 @@ queries:
         note: >
           Table 1 under "Situation update:". Confirmed: the p2 table chunk
           carries the "Table 1." caption.
-    notes: Explicit table phrasing over the smallest corpus document.
 
-  # --- stratum: figure ----------------------------------------------------
-  # The query names a figure or diagram explicitly.
+  - id: q013
+    query: Show the table of estimated remaining carbon budgets.
+    stratum: table
+    requires: table
+    evidence:
+      - doc_id: ipcc_ar6_wg1_spm
+        page: 29
+        modality: table
+        note: >
+          Confirmed: p29 table chunk is captioned "Table SPM.2 | Estimates of
+          historical carbon dioxide (CO2) emissions and remaining carbon
+          budgets".
 
-  - id: q005
+  - id: q014
+    query: Which table gives the assessed changes in global surface temperature?
+    stratum: table
+    requires: table
+    evidence:
+      - doc_id: ipcc_ar6_wg1_spm
+        page: 14
+        modality: table
+        note: >
+          Confirmed: p14 table chunk is captioned "Table SPM.1 | Changes in
+          global surface temperature".
+
+  - id: q015
+    query: Which table contains the comprehensive ViDoRe evaluation results?
+    stratum: table
+    requires: table
+    evidence:
+      - doc_id: arxiv_colpali
+        page: 7
+        modality: table
+        note: >
+          Confirmed: p7 table chunk is captioned "Table 2: Comprehensive
+          evaluation of baseline models and our proposed method on ViDoRe".
+
+  - id: q016
+    query: Which table describes the GPIO function names on the RP2040?
+    stratum: table
+    requires: table
+    evidence:
+      - doc_id: rp2040_datasheet
+        page: 14
+        modality: table
+        note: >
+          Confirmed: p14 table chunk has columns "Function Name | Description"
+          and describes SPIx connecting the internal PL022 SPI peripheral.
+
+  - id: q017
+    query: Which table lists the general-purpose digital input and output pins?
+    stratum: table
+    requires: table
+    evidence:
+      - doc_id: rp2040_datasheet
+        page: 12
+        modality: table
+        note: >
+          Confirmed: p12 table chunk has columns "Name | Description" with the
+          GPIOx row describing general-purpose digital input and output.
+
+  - id: q018
+    query: Which table breaks down premiums earned and pre-tax underwriting results?
+    stratum: table
+    requires: table
+    evidence:
+      - doc_id: berkshire_ar_2023
+        page: 63
+        modality: table
+        note: >
+          Confirmed: p63 table chunk carries the column headers "Premiums
+          earned" and "Pre-tax underwriting". NEEDS REVIEW -- Berkshire's
+          tables are whitespace-aligned and several neighbouring pages carry
+          similar segment tables; p61 and p62 may also qualify.
+
+  # =======================================================================
+  # stratum: figure -- query names a figure or diagram explicitly (8)
+  # =======================================================================
+
+  - id: q019
     query: What does the Transformer model architecture diagram show?
     stratum: figure
     requires: figure
@@ -105,14 +300,14 @@ queries:
         page: 3
         modality: figure
         note: >
-          Figure 1 "The Transformer - model architecture", section 3 Model
-          Architecture. Confirmed: the only figure chunk on p3.
+          Figure 1 "The Transformer - model architecture", section 3.
+          Confirmed: the only figure chunk on p3.
     notes: >
-      The query used throughout the fusion investigation. Also the one the
-      MetadataResolver defect narrows to nvidia_ampere_wp on the word
-      "architecture" -- expect Method 2 to miss this until that is fixed.
+      Also the query the MetadataResolver defect narrows to nvidia_ampere_wp on
+      the word "architecture" -- expect Method 2 to miss this until that is
+      fixed. Kept deliberately, so the defect shows up as a number.
 
-  - id: q006
+  - id: q020
     query: Which figure illustrates the MIG multi-instance GPU architecture?
     stratum: figure
     requires: figure
@@ -121,23 +316,224 @@ queries:
         page: 47
         modality: figure
         note: >
-          Figure under "MIG (Multi-Instance GPU) Architecture". Confirmed: p47
-          figure chunk carries the section breadcrumb and a "Figure" caption.
+          Confirmed: p47 figure chunk sits under the "MIG (Multi-Instance GPU)
+          Architecture" breadcrumb and carries a "Figure" caption.
       - doc_id: nvidia_ampere_wp
         page: 48
         modality: figure
         note: >
-          Continuation of the same MIG architecture illustration. NEEDS REVIEW
-          -- two adjacent pages both carry MIG figures; either may be the one a
-          reader means.
-    notes: Multi-evidence query; tests that recall counts distinct pages.
+          NEEDS REVIEW -- p48 carries a further MIG architecture figure.
+          Included as an acceptable alternative; drop if evidence should be a
+          single page.
 
-  # --- stratum: natural ---------------------------------------------------
-  # Phrased the way a user actually asks, with no modality word. This is the
-  # honest slice: the router audit found 23/25 such queries fall back and fan
-  # out, so a number pooled across strata flatters the router.
+  - id: q021
+    query: Which figure shows the overview of the RAG approach?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: arxiv_rag
+        page: 2
+        modality: figure
+        note: >
+          Confirmed: p2 figure chunk is captioned "Figure 1: Overview of our
+          approach", describing the query encoder and document index.
 
-  - id: q007
+  - id: q022
+    query: Which figure plots AlphaFold's accuracy on recent PDB structures?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: alphafold_nature_2021
+        page: 3
+        modality: figure
+        note: >
+          Confirmed: p3 figure chunk is captioned "Fig. 2 | Accuracy of
+          AlphaFold on recent PDB structures".
+
+  - id: q023
+    query: Which figure shows the Evoformer block and architectural details?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: alphafold_nature_2021
+        page: 4
+        modality: figure
+        note: >
+          Confirmed: p4 figure chunk is captioned "Fig. 3 | Architectural
+          details. a, Evoformer block."
+
+  - id: q024
+    query: Which figure shows projected changes in hot temperature extremes over land?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: ipcc_ar6_wg1_spm
+        page: 18
+        modality: figure
+        note: >
+          Confirmed: p18 figure chunk is captioned "Figure SPM.6 | Projected
+          changes in the intensity and frequency of hot temperature extremes
+          over land".
+
+  - id: q025
+    query: Which chart shows total energy-related carbon dioxide emissions?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: eia_aeo_2023
+        page: 12
+        modality: figure
+        note: >
+          Confirmed: p12 figure chunk is captioned "Figure 1. Total
+          energy-related carbon dioxide emissions" (OCR text runs the words
+          together, which is a known OCR limitation).
+
+  - id: q026
+    query: Which diagram shows the systems engineering engine?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: nasa_seh
+        page: 16
+        modality: figure
+        note: >
+          Confirmed: p16 figure chunk is captioned "FIGURE 2.1-1 The Systems
+          Engineering Engine (NPR 7123.1)".
+
+  # =======================================================================
+  # stratum: natural -- no modality word; the honest slice (14)
+  # Reported separately, because the router only discriminates on explicit
+  # cues and these are the queries a user would actually type.
+  # =======================================================================
+
+  # --- natural, answer in prose (5) ---
+
+  - id: q027
+    query: What was headline inflation in the euro area at the end of 2023?
+    stratum: natural
+    requires: figure
+    evidence:
+      - doc_id: ecb_annual_report_2023
+        page: 7
+        modality: figure
+        note: >
+          Confirmed: the "2.9% in December 2023, down from 9.2%" sentence lives
+          in a FIGURE chunk on p7 -- the "The year at a glance" infographic,
+          where the text is baked into the image and was recovered by OCR.
+    notes: >
+      Corrected during verification: originally labelled requires=text on the
+      assumption that a sentence like this lives in prose. It does not. This is
+      now one of the most interesting queries in the set -- a figure-borne
+      answer that only became retrievable at all once OCR ran, and that Method
+      1 would have missed entirely before then.
+
+  - id: q028
+    query: How many cores does the RP2040 have and what are they?
+    stratum: natural
+    requires: text
+    evidence:
+      - doc_id: rp2040_datasheet
+        page: 9
+        modality: text
+        note: >
+          Confirmed: p9 text chunk in "Chapter 1. Introduction" lists key
+          features including the dual Cortex-M0+ cores.
+
+  - id: q029
+    query: What makes retrieval-augmented models better than purely parametric ones?
+    stratum: natural
+    requires: text
+    evidence:
+      - doc_id: arxiv_rag
+        page: 1
+        modality: text
+        note: >
+          Confirmed: same p1 passage as q003, reached without naming the
+          mechanism. The pair (q003, q029) isolates phrasing, not content.
+
+  - id: q030
+    query: What did the first reported coronavirus cases outside China look like?
+    stratum: natural
+    requires: text
+    evidence:
+      - doc_id: who_covid_sitrep_001
+        page: 1
+        modality: text
+        note: >
+          Confirmed: p1 text chunk reports the Republic of Korea case.
+          NEEDS REVIEW -- p2 also carries surveillance detail and may be a
+          second valid page.
+
+  - id: q031
+    query: What is the difference between verifying a product and validating it?
+    stratum: natural
+    requires: text
+    evidence:
+      - doc_id: nasa_seh
+        page: 21
+        modality: text
+        note: >
+          Confirmed: p21 text chunks sit under "2.4 Distinctions between Product
+          Verification and Product Validation" and contrast the two from a
+          process perspective.
+    notes: >
+      Query rewritten during verification. It originally asked about design
+      trade studies, a sentence that does appear on p21 but only in the tail of
+      one chunk; the page is really about verification versus validation, so
+      the original query would have scored a page that barely supports it.
+
+  # --- natural, answer in a table (4) ---
+
+  - id: q032
+    query: What BLEU score did the big Transformer model achieve?
+    stratum: natural
+    requires: table
+    evidence:
+      - doc_id: arxiv_attention
+        page: 9
+        modality: table
+        note: >
+          Confirmed: same p9 table as q011, reached without naming a table.
+          The pair (q011, q032) isolates the router's modality cue.
+
+  - id: q033
+    query: How many confirmed cases were reported in China?
+    stratum: natural
+    requires: table
+    evidence:
+      - doc_id: who_covid_sitrep_001
+        page: 2
+        modality: table
+        note: >
+          Confirmed: same Table 1 as q012, phrased naturally.
+
+  - id: q034
+    query: How much CO2 can still be emitted to stay within 1.5 degrees?
+    stratum: natural
+    requires: table
+    evidence:
+      - doc_id: ipcc_ar6_wg1_spm
+        page: 29
+        modality: table
+        note: >
+          Confirmed: Table SPM.2 carries the remaining carbon budget
+          estimates. Same page as q013, phrased naturally.
+
+  - id: q035
+    query: Which SPI peripheral does the RP2040 expose and how is it connected?
+    stratum: natural
+    requires: table
+    evidence:
+      - doc_id: rp2040_datasheet
+        page: 14
+        modality: table
+        note: >
+          Confirmed: the p14 Function Name table describes SPIx connecting the
+          internal PL022 SPI peripheral. Same page as q016.
+
+  # --- natural, answer in a figure (5) ---
+
+  - id: q036
     query: How does an A100 partition its compute between workloads?
     stratum: natural
     requires: figure
@@ -146,26 +542,105 @@ queries:
         page: 47
         modality: figure
         note: >
-          Same MIG architecture figure as q006, reached without naming a
-          figure. Confirmed alongside q006.
+          Confirmed: the p47 figure's OCR text is the MIG partitioning diagram
+          ("CSP Multi-Instance GPU (MIG)", GPU Instance 0/1/2). Deliberately
+          the same evidence as q020, so the pair differs only in phrasing.
+      - doc_id: nvidia_ampere_wp
+        page: 48
+        modality: figure
+        note: >
+          Confirmed: "Figure 22. Example MIG compute configuration" under "MIG
+          Architecture and GPU Instances in Detail". Matches q020's second
+          evidence page, keeping the pair symmetric.
     notes: >
-      Figure-borne answer, natural phrasing. The pair (q006, q007) isolates the
-      cost of the router having no modality cue.
+      Worth knowing when reading a miss here: the p47 chunk's caption reads
+      "Figure 20. CSP Multi-user node Today" while its OCR content is the MIG
+      diagram, so caption and image disagree on that page. An ingestion
+      observation, not something this gold set tries to correct.
 
-  - id: q008
+  - id: q037
     query: How much warming is projected under the high emissions scenario?
     stratum: natural
     requires: figure
     evidence:
       - doc_id: ipcc_ar6_wg1_spm
-        page: 16
+        page: 22
         modality: figure
         note: >
-          Box SPM.1 scenario figure under "B. Possible Climate Futures".
-          Confirmed: p16 figure chunk matches /scenario/. NEEDS REVIEW -- SPM.8
-          on p22 also carries projected-warming indicators and may belong here
-          as a second evidence page.
+          Confirmed: p22 figure chunk is captioned "Figure SPM.8 | Selected
+          indicators of global climate change under the five illustrative
+          scenarios". NEEDS REVIEW -- the Box SPM.1 scenario figure on p16 was
+          the original target during the fusion investigation and may be
+          equally valid; both carry scenario projections.
     notes: >
       Known hard case: the cross-encoder scores this chart below prose because
       its OCR text is thin. Recorded in docs/architecture.md as a content
       limitation rather than a fusion one.
+
+  - id: q038
+    query: How does AlphaFold's accuracy compare with other methods at CASP14?
+    stratum: natural
+    requires: figure
+    evidence:
+      - doc_id: alphafold_nature_2021
+        page: 2
+        modality: figure
+        note: >
+          Confirmed: p2 figure chunk is captioned "Fig. 1 | AlphaFold produces
+          highly accurate structures. a, The performance of AlphaFold on the
+          CASP14 ..." -- the CASP14 comparison panel.
+
+  - id: q039
+    query: How does US electricity generation change across technologies by 2050?
+    stratum: natural
+    requires: figure
+    evidence:
+      - doc_id: eia_aeo_2023
+        page: 14
+        modality: figure
+        note: >
+          Confirmed: p14 figure chunk is captioned "Figure 2. U.S. electricity
+          generation by select technologies for all cases", listing solar,
+          wind and natural gas.
+
+  - id: q040
+    query: How do the systems engineering processes fit into overall project management?
+    stratum: natural
+    requires: figure
+    evidence:
+      - doc_id: nasa_seh
+        page: 15
+        modality: figure
+        note: >
+          Confirmed: p15 figure chunk is captioned "FIGURE 2.0-1 SE in Context
+          of Overall Project Management".
+
+  - id: q041
+    query: How strong were job gains and what happened to the unemployment rate?
+    stratum: natural
+    requires: text
+    evidence:
+      - doc_id: fed_mpr_2024_07
+        page: 7
+        modality: text
+        note: >
+          Confirmed: p7 text chunk under "Summary > Recent Economic and
+          Financial Developments" states job gains averaged 248,000 per month
+          over the first five months and the unemployment rate remained low.
+
+  - id: q042
+    query: Which chart tracks the unemployment rate over time?
+    stratum: figure
+    requires: figure
+    evidence:
+      - doc_id: fed_mpr_2024_07
+        page: 19
+        modality: figure
+        note: >
+          Confirmed: p19 figure chunk under "The labor market remains strong"
+          carries the note "Unemployment rate measures total unemployed as a
+          percentage of the labor force" and a Bureau of Labor Statistics
+          source line.
+    notes: >
+      Added during verification to bring the last corpus document into the set;
+      without it fed_mpr_2024_07 -- 79 pages and 82 figures -- was unrepresented.
