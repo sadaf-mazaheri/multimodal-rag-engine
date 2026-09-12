@@ -169,12 +169,18 @@ entries:
 
   - doc_id: arxiv_tapas
     title: "TAPAS: Weakly Supervised Table Parsing via Pre-training"
-    url: https://arxiv.org/pdf/2004.08483
-    publisher: arXiv (2004.08483)
+    url: https://arxiv.org/pdf/2004.02349
+    publisher: arXiv (2004.02349)
     category: science
     license: "arXiv non-exclusive licence to distribute"
     modality_profile: [tables, equations, multi_column]
-    notes: Table-reasoning paper containing tables about table reasoning; dense numeric results grids.
+    notes: >
+      Table-reasoning paper containing tables about table reasoning; dense numeric results grids.
+      Corrected 2026-09-12: the url previously read 2004.08483, which is "ETC: Encoding Long and
+      Structured Inputs in Transformers" -- a different paper. The title here was always TAPAS, so
+      every chunk of that document carried a document title its text never mentioned, and the
+      metadata resolver would narrow any "TAPAS" query onto the wrong paper. The lockfile could not
+      catch it: it verifies the bytes of whatever url it is given.
 
   - doc_id: alphafold_nature_2021
     title: Highly accurate protein structure prediction with AlphaFold

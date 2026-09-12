@@ -20,9 +20,9 @@ entries:
     sha256: 23e3249e9a1e75418d82efecab0ea8c4d033b89c93742f63208d47ce01f21233
     size_bytes: 885323
   arxiv_tapas:
-    n_pages: 17
-    sha256: a54cb8dc8c903f964457a346c761a3ebcdce69a427a3f5f269454d74783d6e3d
-    size_bytes: 689430
+    n_pages: 14
+    sha256: c51324db2fa68e0e75a6be018620619e5b072358f9921663105ec50ef889024d
+    size_bytes: 601096
   berkshire_ar_2023:
     n_pages: 152
     sha256: 2132b85f9c472a6f0b141551adb08d93f88db28e6a3794e7e2b13ca3f8a57b5b
@@ -59,5 +59,5 @@ entries:
     n_pages: 5
     sha256: 6d098cf680fe791f1e66cf39a199aebc2dcab700a54535563e0c57b3162ea456
     size_bytes: 764470
-generated_at: '2026-09-06T09:19:21+00:00'
+generated_at: '2026-09-11T21:28:58+00:00'
 version: 1
