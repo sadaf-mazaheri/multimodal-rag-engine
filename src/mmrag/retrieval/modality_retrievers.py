@@ -234,6 +234,10 @@ class TableRetriever:
             ],
             k=INTERNAL_RRF_K,
             top_k=k,
+            # Two routes to one table, not two independent votes: a table found
+            # by a cell value and one found by its caption are the same table,
+            # so the better route decides. See reciprocal_rank_fusion.
+            combine="max",
         )
         hits = [Hit(chunk_id=r.chunk_id, score=r.score, rank=r.rank) for r in fused]
 
@@ -307,7 +311,11 @@ class ImageRetriever:
             )
             ranked.append(RankedList("figure_text", [h.chunk_id for h in textual_hits]))
 
-        fused = reciprocal_rank_fusion(ranked, k=INTERNAL_RRF_K, top_k=k)
+        # Summing here capped a figure at 1/(k+1) unless *both* signals ranked
+        # it, which is unreachable for the 37 figures carrying no text at all --
+        # precisely the ones this index exists to find. See
+        # reciprocal_rank_fusion for the measurements.
+        fused = reciprocal_rank_fusion(ranked, k=INTERNAL_RRF_K, top_k=k, combine="max")
         hits = [Hit(chunk_id=r.chunk_id, score=r.score, rank=r.rank) for r in fused]
 
         # The headline diagnostic for Method 2: hits that exist only because of

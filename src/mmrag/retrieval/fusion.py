@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -60,8 +60,29 @@ def reciprocal_rank_fusion(
     k: int = 60,
     weights: dict[str, float] | None = None,
     top_k: int | None = None,
+    combine: Literal["sum", "max"] = "sum",
 ) -> list[FusedResult]:
     """Fuse ranked lists into one ordering.
+
+    ``combine`` decides what several lists agreeing is worth.
+
+    ``sum`` is classic RRF and the right default *across* modalities, where each
+    list is an independent vote: two retrievers agreeing is real evidence.
+
+    ``max`` suits fusion *within* one modality, where the lists are alternative
+    routes to the same evidence rather than independent judges -- a figure found
+    by its pixels or by its caption is the same figure, and the better route
+    should decide. Summing there produced a defect: a candidate present in one
+    list is capped at ``1/(k+1)`` however perfect its match, so it loses to any
+    candidate sitting mid-table in both. On this corpus that demoted figures
+    ranked *first* by CLIP or by figure-text to 24th, 28th and 39th, below the
+    pool floor, so the cross-encoder never saw them.
+
+    That asymmetry is not always recoverable by ranking better, because the
+    sub-signals do not cover the same universe: 37 figures carry no text at all
+    and are structurally absent from the figure-text index. Under ``sum`` their
+    absence reads as "ranked worst" rather than "not applicable" -- penalising
+    exactly the figures the image index exists to reach.
 
     Ties are broken by the best single rank a chunk achieved, then by chunk id,
     so the output is deterministic. Non-determinism here would make two runs of
@@ -70,6 +91,8 @@ def reciprocal_rank_fusion(
     """
     if k < 1:
         raise ValueError(f"rrf k must be >= 1, got {k}")
+    if combine not in ("sum", "max"):
+        raise ValueError(f"combine must be 'sum' or 'max', got {combine!r}")
 
     weights = weights or {}
     scores: dict[str, float] = defaultdict(float)
@@ -80,13 +103,28 @@ def reciprocal_rank_fusion(
         if weight == 0:
             continue
         for chunk_id, rank in ranked.ranks().items():
-            scores[chunk_id] += weight / (k + rank)
+            contribution = weight / (k + rank)
+            if combine == "max":
+                scores[chunk_id] = max(scores[chunk_id], contribution)
+            else:
+                scores[chunk_id] += contribution
             components[chunk_id][ranked.retriever] = rank
 
-    order = sorted(
-        scores,
-        key=lambda cid: (-scores[cid], min(components[cid].values()), cid),
-    )
+    if combine == "max":
+        # Under max, the top of every list scores exactly w/(k+1), so rank-one
+        # candidates tie by construction. Corroboration breaks that tie: among
+        # equally good best-routes, the candidate more signals found wins. It
+        # cannot distort the primary ordering, which is the property summing
+        # failed to have. Applied only here, so `sum` -- and Method 1 with it --
+        # keeps the tie-break it was measured under.
+        def sort_key(cid: str) -> tuple[float, int, int, str]:
+            return (-scores[cid], -len(components[cid]), min(components[cid].values()), cid)
+    else:
+
+        def sort_key(cid: str) -> tuple[float, int, int, str]:
+            return (-scores[cid], 0, min(components[cid].values()), cid)
+
+    order = sorted(scores, key=sort_key)
     if top_k is not None:
         order = order[:top_k]
 

@@ -635,3 +635,139 @@ class TestImageEmbedderDimension:
         embedder = self._embedder(self._SilentModel(512))
         assert embedder.embed_queries([]).shape == (0, 512)
 
+
+class TestModalityInternalFusionUsesBestRoute:
+    """A modality's two sub-signals are alternative routes, not two votes.
+
+    Diagnosed from four gold queries Method 1 answered and Method 2 lost. In
+    each, the gold figure was ranked *first* by one sub-signal and absent from
+    the other's window, so summing capped it at 1/(k+1) and every candidate
+    sitting mid-table in both outranked it. Measured gold ranks after internal
+    fusion were 24, 28, 39 and 11 -- all past the rerank pool floor of 8, so the
+    cross-encoder never scored them.
+    """
+
+    class _Store:
+        """Returns a fixed ranked list, standing in for a Qdrant collection."""
+
+        collection = "stub"
+
+        def __init__(self, ids):
+            self.ids = ids
+
+        def exists(self):
+            return True
+
+        def search(self, vector, k, doc_ids=None, chunk_types=None):  # noqa: ARG002
+            return [Hit(chunk_id=c, score=1.0, rank=i) for i, c in enumerate(self.ids[:k], 1)]
+
+    class _Index:
+        """Stands in for a BM25 index over one sub-signal's universe."""
+
+        def __init__(self, ids):
+            self.ids = ids
+
+        def __len__(self):
+            return len(self.ids)
+
+        def search(self, query, k):  # noqa: ARG002
+            return [Hit(chunk_id=c, score=1.0, rank=i) for i, c in enumerate(self.ids[:k], 1)]
+
+    def _embedder(self):
+        class Fake:
+            def ensure_loaded(self):
+                return 0.0
+
+            def embed_query(self, text):  # noqa: ARG002
+                import numpy as np
+
+                return np.zeros(4, dtype="float32")
+
+        return Fake()
+
+    def _figures(self, ids):
+        return {c: _chunk(i, chunk_id=c, chunk_type=ChunkType.FIGURE) for i, c in enumerate(ids)}
+
+    def test_a_clip_only_figure_outranks_mediocre_agreement(self):
+        """q025's shape: gold was CLIP rank 1, absent from figure-text."""
+        from mmrag.retrieval.modality_retrievers import ImageRetriever
+
+        retriever = ImageRetriever(
+            image_store=self._Store(["clip_only", "rival"]),
+            image_embedder=self._embedder(),
+            text_index=self._Index(["decoy", "rival"]),
+            chunks=self._figures(["clip_only", "rival", "decoy"]),
+        )
+        ids = [h.chunk_id for h in retriever.retrieve("a chart of emissions", 10).hits]
+        assert ids.index("clip_only") < ids.index("rival")
+
+    def test_a_text_only_figure_outranks_mediocre_agreement(self):
+        """q023/q027's shape: gold was figure-text rank 1, absent from CLIP."""
+        from mmrag.retrieval.modality_retrievers import ImageRetriever
+
+        # The competitor sits second in both lists, as in the real failure:
+        # summing let 1/62 + 1/62 beat a perfect 1/61.
+        retriever = ImageRetriever(
+            image_store=self._Store(["decoy", "rival"]),
+            image_embedder=self._embedder(),
+            text_index=self._Index(["text_only", "rival"]),
+            chunks=self._figures(["text_only", "rival", "decoy"]),
+        )
+        ids = [h.chunk_id for h in retriever.retrieve("the Evoformer block", 10).hits]
+        assert ids.index("text_only") < ids.index("rival")
+
+    def test_a_textless_figure_is_not_penalised_for_being_textless(self):
+        """37 figures carry no text, so figure-text cannot rank them at all.
+
+        Under summing their absence read as "ranked worst", penalising exactly
+        the figures the CLIP index exists to reach.
+        """
+        from mmrag.retrieval.modality_retrievers import ImageRetriever
+
+        retriever = ImageRetriever(
+            image_store=self._Store(["textless", "captioned"]),
+            image_embedder=self._embedder(),
+            text_index=self._Index(["other", "captioned"]),
+            chunks=self._figures(["textless", "captioned", "other"]),
+        )
+        ids = [h.chunk_id for h in retriever.retrieve("a diagram", 10).hits]
+        assert ids.index("textless") < ids.index("captioned")
+
+    def test_a_figure_leading_both_signals_still_wins(self):
+        """Best-route fusion must not invert the ordering."""
+        from mmrag.retrieval.modality_retrievers import ImageRetriever
+
+        retriever = ImageRetriever(
+            image_store=self._Store(["agreed", "solo"]),
+            image_embedder=self._embedder(),
+            text_index=self._Index(["agreed"]),
+            chunks=self._figures(["agreed", "solo"]),
+        )
+        assert retriever.retrieve("a diagram", 10).hits[0].chunk_id == "agreed"
+
+    def test_a_table_matching_both_views_still_ranks_first(self):
+        """Table sub-signals cover the same 445 chunks, so nothing should move."""
+        from mmrag.retrieval.modality_retrievers import TableRetriever
+
+        ids = ["both", "content_only", "schema_only"]
+        chunks = {c: _chunk(i, chunk_id=c, chunk_type=ChunkType.TABLE) for i, c in enumerate(ids)}
+        retriever = TableRetriever(
+            content_index=self._Index(["both", "content_only"]),
+            schema_store=self._Store(["both", "schema_only"]),
+            embedder=self._embedder(),
+            chunks=chunks,
+        )
+        assert retriever.retrieve("revenue by segment", 10).hits[0].chunk_id == "both"
+
+    def test_a_table_found_by_one_view_alone_still_surfaces(self):
+        from mmrag.retrieval.modality_retrievers import TableRetriever
+
+        ids = ["content_only", "rival", "decoy"]
+        chunks = {c: _chunk(i, chunk_id=c, chunk_type=ChunkType.TABLE) for i, c in enumerate(ids)}
+        retriever = TableRetriever(
+            content_index=self._Index(["content_only", "rival"]),
+            schema_store=self._Store(["decoy", "rival"]),
+            embedder=self._embedder(),
+            chunks=chunks,
+        )
+        assert retriever.retrieve("22,360", 10).hits[0].chunk_id == "content_only"

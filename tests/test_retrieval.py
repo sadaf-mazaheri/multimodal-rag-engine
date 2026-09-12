@@ -170,6 +170,17 @@ class TestRRF:
         results = reciprocal_rank_fusion(lists, weights={"bm25": 2.0, "dense": 1.0})
         assert results[0].chunk_id == "a"
 
+    def test_combine_defaults_to_sum(self):
+        """An unaware caller must be unaffected: Method 1 depends on this."""
+        lists = [RankedList("bm25", ["a"]), RankedList("dense", ["a"])]
+        assert reciprocal_rank_fusion(lists, k=60)[0].score == pytest.approx(
+            reciprocal_rank_fusion(lists, k=60, combine="sum")[0].score
+        )
+
+    def test_an_unknown_combine_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="combine must be"):
+            reciprocal_rank_fusion([RankedList("bm25", ["a"])], combine="mean")
+
     def test_zero_weight_excludes_a_retriever_entirely(self):
         lists = [RankedList("bm25", ["a"]), RankedList("dense", ["b"])]
         results = reciprocal_rank_fusion(lists, weights={"bm25": 0.0})
@@ -224,6 +235,107 @@ class TestRRF:
     def test_invalid_k_is_rejected(self):
         with pytest.raises(ValueError, match="rrf k must be >= 1"):
             reciprocal_rank_fusion([RankedList("bm25", ["a"])], k=0)
+
+
+class TestRRFMaxMode:
+    """``combine="max"`` for fusing alternative routes to the same evidence.
+
+    Under ``sum`` a candidate only one list can see is capped at 1/(k+1) however
+    perfect its match, so it loses to anything sitting mid-table in both. Inside
+    the image retriever that demoted figures ranked *first* by CLIP or by
+    figure-text to 24th, 28th and 39th -- below the rerank pool floor, so the
+    cross-encoder never got to judge them.
+    """
+
+    def test_score_is_the_best_single_contribution(self):
+        lists = [RankedList("clip", ["a"]), RankedList("text", ["a"])]
+        result = reciprocal_rank_fusion(lists, k=60, combine="max")[0]
+        assert result.score == pytest.approx(1 / 61)
+
+    def test_a_rank_one_single_signal_beats_mediocre_agreement(self):
+        """The exact shape of the q023/q025/q027 failures.
+
+        Under sum: solo scores 1/61 = 0.01639 while agreed scores
+        1/90 + 1/62 = 0.02724, so the perfect single match loses.
+        """
+        lists = [
+            RankedList("clip", ["agreed"] + [f"pad{i}" for i in range(28)] + ["solo_text"]),
+            RankedList("text", ["solo_text"] + [f"q{i}" for i in range(28)] + ["agreed"]),
+        ]
+        # solo_text is rank 1 in text and rank 30 in clip; agreed is the mirror.
+        summed = reciprocal_rank_fusion(lists, k=60, combine="sum")
+        maxed = reciprocal_rank_fusion(lists, k=60, combine="max")
+        assert {r.chunk_id for r in summed[:2]} == {"agreed", "solo_text"}
+        # With max both reach 1/61 and tie-break deterministically, and neither
+        # is buried behind the padding.
+        assert {r.chunk_id for r in maxed[:2]} == {"agreed", "solo_text"}
+
+    def test_a_candidate_only_one_list_can_see_is_not_penalised(self):
+        """A textless figure is structurally absent from the figure-text index.
+
+        The competitor here is second-best in both lists, which is the shape of
+        the real q025 failure: summing lets 1/62 + 1/62 beat a perfect 1/61.
+        """
+        lists = [
+            RankedList("clip", ["textless_figure", "captioned"]),
+            RankedList("text", ["other", "captioned"]),
+        ]
+
+        def order(mode):
+            return [r.chunk_id for r in reciprocal_rank_fusion(lists, k=60, combine=mode)]
+
+        # Today's defect: the dual-signal figure outranks the perfect single one.
+        summed = order("sum")
+        assert summed.index("captioned") < summed.index("textless_figure")
+
+        # Fixed: the best route decides, so the CLIP-only figure comes first.
+        maxed = order("max")
+        assert maxed.index("textless_figure") < maxed.index("captioned")
+        by_id = {r.chunk_id: r for r in reciprocal_rank_fusion(lists, k=60, combine="max")}
+        assert by_id["textless_figure"].score == pytest.approx(1 / 61)
+
+    def test_corroboration_breaks_a_tie_between_equal_best_routes(self):
+        """Under max every list's rank-one ties, so agreement decides.
+
+        This is the only place corroboration still counts, and it cannot
+        distort the primary ordering -- which is what summing got wrong.
+        """
+        lists = [
+            RankedList("clip", ["both", "solo"]),
+            RankedList("text", ["both"]),
+        ]
+        results = reciprocal_rank_fusion(lists, k=60, combine="max")
+        assert results[0].chunk_id == "both"
+
+    def test_the_sum_tie_break_is_unchanged(self):
+        """Method 1 was measured under this ordering; it must not move."""
+        lists = [
+            RankedList("bm25", ["zeta", "alpha"]),
+            RankedList("dense", ["alpha", "zeta"]),
+        ]
+        results = reciprocal_rank_fusion(lists, k=60, combine="sum")
+        # Identical scores and identical best ranks, so chunk id decides.
+        assert [r.chunk_id for r in results] == ["alpha", "zeta"]
+
+    def test_agreement_still_wins_when_it_also_ranks_better(self):
+        """max does not invert the ordering; it stops list count deciding it."""
+        lists = [
+            RankedList("clip", ["agreed", "solo"]),
+            RankedList("text", ["agreed"]),
+        ]
+        assert reciprocal_rank_fusion(lists, k=60, combine="max")[0].chunk_id == "agreed"
+
+    def test_component_ranks_are_still_recorded(self):
+        lists = [RankedList("clip", ["a"]), RankedList("text", ["b", "a"])]
+        by_id = {r.chunk_id: r for r in reciprocal_rank_fusion(lists, combine="max")}
+        assert by_id["a"].component_ranks == {"clip": 1, "text": 2}
+
+    def test_weights_still_apply(self):
+        lists = [RankedList("clip", ["a"]), RankedList("text", ["b"])]
+        results = reciprocal_rank_fusion(
+            lists, weights={"clip": 0.5, "text": 1.0}, combine="max"
+        )
+        assert results[0].chunk_id == "b"
 
 
 class TestFusionDiagnostics:
