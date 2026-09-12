@@ -65,15 +65,15 @@ queries:
         page: 3
         modality: text
         note: >
-          Confirmed: p3 text chunk discusses late interaction against
-          bi-encoder query matching, referring to section E.
-      - doc_id: arxiv_colpali
-        page: 1
-        modality: text
-        note: >
-          Abstract also states the late-interaction claim. NEEDS REVIEW --
-          included as a second acceptable page; drop if evidence should be the
-          single most specific page.
+          Reviewed and confirmed. p3 is the minimal sufficient evidence: it
+          gives the motivation for late interaction, contrasts it with
+          single-vector bi-encoder retrieval, and states the benefit of
+          fine-grained query-document term interaction.
+    notes: >
+      The p1 abstract was originally listed as a second evidence page and was
+      removed on review as redundant -- it asserts the late-interaction claim
+      without explaining it, so crediting it would reward retrieving the
+      weaker of the two pages.
 
   - id: q003
     query: How does retrieval-augmented generation combine parametric and non-parametric memory?
@@ -149,10 +149,21 @@ queries:
         page: 1
         modality: text
         note: >
-          Confirmed: p1 text chunk introduces scaling input length and
-          encoding structured inputs for standard Transformer architectures.
-          NEEDS REVIEW -- the retrieved chunk's section is unlabelled, so the
-          page was identified by content rather than by heading.
+          Re-verified against the corrected corpus. The p1 abstract states the
+          problem explicitly: "Answering natural language questions over tables
+          is usually seen as a semantic parsing task. To alleviate the
+          collection cost of full logical forms, one popular approach focuses
+          on weak supervision consisting of denotations instead of logical
+          forms. However, training semantic parsers from weak supervision poses
+          difficulties..." The introduction on the same page restates it.
+    notes: >
+      This entry was previously marked NEEDS REVIEW because the evidence did
+      not support the query. The cause was not the annotation: configs/corpus.yaml
+      paired the TAPAS title with arXiv 2004.08483, which is a different paper
+      ("ETC: Encoding Long and Structured Inputs in Transformers"), so the
+      corpus contained no TAPAS paper and the question was unanswerable. The
+      manifest url was corrected to 2004.02349 and the document re-ingested;
+      the page number is unchanged at 1 only by coincidence.
 
   - id: q009
     query: Summarise the situation reported in the first WHO novel coronavirus report.
@@ -282,10 +293,11 @@ queries:
         page: 63
         modality: table
         note: >
-          Confirmed: p63 table chunk carries the column headers "Premiums
-          earned" and "Pre-tax underwriting". NEEDS REVIEW -- Berkshire's
-          tables are whitespace-aligned and several neighbouring pages carry
-          similar segment tables; p61 and p62 may also qualify.
+          Reviewed and confirmed. The p63 table sits under the
+          "Insurance-Underwriting" heading (printed page K-63) and carries the
+          column headers "Premiums earned" and "Pre-tax underwriting earnings
+          (loss)". p61 and p62 were considered on review and are not needed:
+          they carry different segment tables, not this one.
 
   # =======================================================================
   # stratum: figure -- query names a figure or diagram explicitly (8)
@@ -313,18 +325,16 @@ queries:
     requires: figure
     evidence:
       - doc_id: nvidia_ampere_wp
-        page: 47
-        modality: figure
-        note: >
-          Confirmed: p47 figure chunk sits under the "MIG (Multi-Instance GPU)
-          Architecture" breadcrumb and carries a "Figure" caption.
-      - doc_id: nvidia_ampere_wp
         page: 48
         modality: figure
         note: >
-          NEEDS REVIEW -- p48 carries a further MIG architecture figure.
-          Included as an acceptable alternative; drop if evidence should be a
-          single page.
+          Reviewed and confirmed. p48 carries Figure 22 under "MIG Architecture
+          and GPU Instances in Detail" -- the precise answer for MIG's hardware
+          architecture and internal partitioning.
+    notes: >
+      p47 (Figure 21) was originally listed alongside and was removed on
+      review: it shows the corresponding CSP-user configuration rather than the
+      partitioning itself, so it is not needed as second evidence.
 
   - id: q021
     query: Which figure shows the overview of the RAG approach?
@@ -460,9 +470,12 @@ queries:
         page: 1
         modality: text
         note: >
-          Confirmed: p1 text chunk reports the Republic of Korea case.
-          NEEDS REVIEW -- p2 also carries surveillance detail and may be a
-          second valid page.
+          Reviewed and confirmed as sufficient on its own. The p1 "Situation
+          update" reports all 282 cases across four countries -- China (278),
+          Thailand (2), Japan (1), Republic of Korea (1) -- and states that the
+          four cases outside China were exported from Wuhan City. p2 was
+          considered on review and is not needed: it adds surveillance detail,
+          not the first-cases answer.
 
   - id: q031
     query: What is the difference between verifying a product and validating it?
@@ -542,21 +555,33 @@ queries:
         page: 47
         modality: figure
         note: >
-          Confirmed: the p47 figure's OCR text is the MIG partitioning diagram
-          ("CSP Multi-Instance GPU (MIG)", GPU Instance 0/1/2). Deliberately
-          the same evidence as q020, so the pair differs only in phrasing.
+          Reviewed and kept as the primary evidence. The p47 figure is the one
+          that maps *workloads* onto hardware: its OCR text runs USER0..USER4
+          against GPUInstance0..GPUInstance3, which is exactly what "partition
+          its compute between workloads" asks for. p48/Figure 22 shows the
+          internal slice composition of three GPU Instances but no workloads at
+          all.
       - doc_id: nvidia_ampere_wp
         page: 48
         modality: figure
         note: >
-          Confirmed: "Figure 22. Example MIG compute configuration" under "MIG
-          Architecture and GPU Instances in Detail". Matches q020's second
-          evidence page, keeping the pair symmetric.
+          Kept as secondary: "Figure 22. Example MIG compute configuration"
+          under "MIG Architecture and GPU Instances in Detail" also answers the
+          question, one level lower.
     notes: >
+      q020 and q036 are deliberately NOT a strict same-evidence pair, and
+      should not be treated as one. They were originally built that way so the
+      only difference would be phrasing, but the two questions turn out to want
+      different pages: q020 asks which figure illustrates the MIG architecture,
+      answered precisely by p48/Figure 22, while q036 asks how compute is
+      partitioned between workloads, answered more directly by p47. Intent was
+      preferred over the tidiness of the ablation.
+
       Worth knowing when reading a miss here: the p47 chunk's caption reads
       "Figure 20. CSP Multi-user node Today" while its OCR content is the MIG
-      diagram, so caption and image disagree on that page. An ingestion
-      observation, not something this gold set tries to correct.
+      diagram, so caption and image disagree on that page and a lexical
+      retriever sees misleading text. An ingestion observation, not something
+      this gold set tries to correct.
 
   - id: q037
     query: How much warming is projected under the high emissions scenario?
@@ -567,11 +592,13 @@ queries:
         page: 22
         modality: figure
         note: >
-          Confirmed: p22 figure chunk is captioned "Figure SPM.8 | Selected
+          Reviewed and confirmed. p22 carries "Figure SPM.8 | Selected
           indicators of global climate change under the five illustrative
-          scenarios". NEEDS REVIEW -- the Box SPM.1 scenario figure on p16 was
-          the original target during the fusion investigation and may be
-          equally valid; both carry scenario projections.
+          scenarios"; panel (a), "Global surface temperature change relative to
+          1850-1900", is the direct evidence for warming under SSP5-8.5
+          reaching roughly 4.4 C by 2100. p16 (Box SPM.1) was considered on
+          review and is not needed: it describes the scenarios rather than
+          projecting the warming.
     notes: >
       Known hard case: the cross-encoder scores this chart below prose because
       its OCR text is thin. Recorded in docs/architecture.md as a content
