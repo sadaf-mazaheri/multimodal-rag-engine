@@ -19,12 +19,13 @@ build has.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
 from mmrag.logging_utils import get_logger
 from mmrag.retrieval.base import MetadataFilter
-from mmrag.schemas import Document
+from mmrag.schemas import Chunk, Document
 
 log = get_logger(__name__)
 
@@ -74,7 +75,36 @@ STOPWORDS = frozenset(
 # acronyms and fragments do not narrow the corpus by accident.
 MIN_TERM_CHARS = 3
 
+# A title word appearing in at least this fraction of the corpus *body* text is
+# a topic word, not a name, and is discarded as a document signal.
+#
+# Titles alone cannot tell the two apart. "Architecture" appears in exactly one
+# of fourteen titles, which made it look maximally discriminative, while
+# appearing in nine of fourteen documents' text. "Table" is worse: unique to the
+# TAPAS title and present in all fourteen bodies, so every question containing
+# the word "table" was narrowed onto the table-parsing paper.
+#
+# 0.5 sits in the middle of a wide flat optimum -- measured over the gold set,
+# any cut from 3/14 to 9/14 removes every mis-narrowing, and 7/14 through 9/14
+# additionally keeps every correct one. It also reads as a rule rather than a
+# tuned constant: a term in half the corpus is not a name.
+MAX_DOCUMENT_FREQUENCY = 0.5
+
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9\-]+")
+
+
+def corpus_terms(chunks: Iterable[Chunk]) -> dict[str, set[str]]:
+    """Body vocabulary per document, for judging which title words are generic.
+
+    Built from indexed chunks rather than the raw PDFs so it describes exactly
+    the text retrieval can actually see.
+    """
+    out: dict[str, set[str]] = {}
+    for chunk in chunks:
+        out.setdefault(chunk.doc_id, set()).update(
+            w.lower() for w in _WORD_RE.findall(chunk.text)
+        )
+    return out
 
 
 @dataclass
@@ -100,14 +130,31 @@ class DocumentFacet:
 class MetadataResolver:
     """Turns document mentions in a query into a ``doc_id`` filter."""
 
-    def __init__(self, facets: list[DocumentFacet]):
+    def __init__(
+        self,
+        facets: list[DocumentFacet],
+        *,
+        body_terms: dict[str, set[str]] | None = None,
+        max_document_frequency: float = MAX_DOCUMENT_FREQUENCY,
+    ):
         self.facets = facets
-        self._terms = {f.doc_id: f.terms() for f in facets}
+        terms = {f.doc_id: f.terms() for f in facets}
+        self.generic_terms = _generic_terms(terms, body_terms, max_document_frequency)
+        # A generic term is not evidence about *which* document is meant, so it
+        # is removed from every facet rather than from the one that owns it.
+        self._terms = {doc_id: t - self.generic_terms for doc_id, t in terms.items()}
+        if self.generic_terms:
+            log.debug(
+                "metadata resolver: %d title words are too common to identify a "
+                "document and were dropped: %s",
+                len(self.generic_terms),
+                sorted(self.generic_terms),
+            )
 
     # -- construction --------------------------------------------------------
 
     @classmethod
-    def from_postgres(cls) -> MetadataResolver | None:
+    def from_postgres(cls, **kwargs: Any) -> MetadataResolver | None:
         """Load facets from Postgres. Returns None if it is unreachable."""
         try:
             from mmrag.stores.postgres import PostgresStore
@@ -117,19 +164,35 @@ class MetadataResolver:
         except Exception as exc:
             log.info("metadata resolver: Postgres unavailable (%s)", exc)
             return None
-        return cls([_facet(d) for d in documents])
+        return cls([_facet(d) for d in documents], **kwargs)
 
     @classmethod
-    def from_documents(cls, documents: list[Document]) -> MetadataResolver:
-        return cls([_facet(d) for d in documents])
+    def from_documents(cls, documents: list[Document], **kwargs: Any) -> MetadataResolver:
+        return cls([_facet(d) for d in documents], **kwargs)
 
     @classmethod
-    def load(cls, fallback: list[Document] | None = None) -> MetadataResolver:
-        """Postgres if available, otherwise the documents already in hand."""
-        resolver = cls.from_postgres()
+    def load(
+        cls,
+        fallback: list[Document] | None = None,
+        *,
+        corpus: Iterable[Chunk] | None = None,
+        max_document_frequency: float = MAX_DOCUMENT_FREQUENCY,
+    ) -> MetadataResolver:
+        """Postgres if available, otherwise the documents already in hand.
+
+        ``corpus`` supplies the indexed chunks. Without it the resolver cannot
+        tell a document's name from one of its topic words, and falls back to
+        the ``STOPWORDS`` list alone -- which is a hand-maintained approximation
+        of the same judgement and does not scale.
+        """
+        options: dict[str, Any] = {"max_document_frequency": max_document_frequency}
+        if corpus is not None:
+            options["body_terms"] = corpus_terms(corpus)
+
+        resolver = cls.from_postgres(**options)
         if resolver is not None and resolver.facets:
             return resolver
-        return cls.from_documents(fallback or [])
+        return cls.from_documents(fallback or [], **options)
 
     # -- resolution ----------------------------------------------------------
 
@@ -161,7 +224,42 @@ class MetadataResolver:
         return MetadataFilter(doc_ids=sorted(matched))
 
     def describe(self) -> dict[str, Any]:
-        return {"n_documents": len(self.facets)}
+        return {
+            "n_documents": len(self.facets),
+            "n_generic_terms_dropped": len(self.generic_terms),
+            # Absent corpus statistics the resolver is running on titles alone
+            # and will narrow on topic words; worth seeing in a run record.
+            "corpus_statistics": bool(self.generic_terms),
+        }
+
+
+def _generic_terms(
+    facet_terms: dict[str, set[str]],
+    body_terms: dict[str, set[str]] | None,
+    max_document_frequency: float,
+) -> frozenset[str]:
+    """Title words too widespread in the corpus text to name a document.
+
+    Uniqueness among titles is not discriminativeness. With fourteen documents
+    a word can appear in exactly one title -- looking like a perfect identifier
+    -- while appearing in every document's body. Document frequency over the
+    indexed text is the missing signal, and it is the only one that scales:
+    the alternative is enumerating generic words by hand forever.
+    """
+    if not body_terms:
+        return frozenset()
+
+    n_documents = len(body_terms)
+    if n_documents == 0:
+        return frozenset()
+
+    cutoff = max_document_frequency * n_documents
+    candidates = {term for terms in facet_terms.values() for term in terms}
+    return frozenset(
+        term
+        for term in candidates
+        if sum(1 for vocabulary in body_terms.values() if term in vocabulary) >= cutoff
+    )
 
 
 def _facet(document: Document) -> DocumentFacet:

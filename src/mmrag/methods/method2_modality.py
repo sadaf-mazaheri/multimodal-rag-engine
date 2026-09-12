@@ -450,10 +450,18 @@ class Method2ModalityAware:
 
     @property
     def metadata_resolver(self) -> MetadataResolver:
-        """Postgres-backed document resolution, falling back to the sidecars."""
+        """Postgres-backed document resolution, falling back to the sidecars.
+
+        The indexed chunks are handed over so the resolver can tell a
+        document's name from one of its topic words. Titles alone cannot: with
+        fourteen documents, "architecture" and "table" each appear in exactly
+        one title and so looked like perfect identifiers, while appearing in
+        nine and fourteen document bodies respectively.
+        """
         if not hasattr(self, "_resolver"):
             self._resolver = MetadataResolver.load(
-                fallback=self._documents or self._load_documents()
+                fallback=self._documents or self._load_documents(),
+                corpus=self.chunks.values(),
             )
         return self._resolver
 

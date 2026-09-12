@@ -256,6 +256,123 @@ class TestMetadataResolver:
         assert MetadataResolver.from_documents([]).resolve("IPCC").doc_ids is None
 
 
+class TestGenericTitleWordsDoNotIdentifyADocument:
+    """A title word that is common in the corpus text is a topic, not a name.
+
+    Uniqueness among titles is not discriminativeness. On the real corpus,
+    "architecture" appeared in exactly one of fourteen titles -- looking like a
+    perfect identifier -- while appearing in nine documents' body text, and
+    "table" was unique to the TAPAS title while appearing in all fourteen
+    bodies. Eight of thirty narrowing decisions over the gold set went to the
+    wrong document as a result.
+    """
+
+    DOCUMENTS = [
+        _document("nvidia_ampere_wp", "NVIDIA A100 Tensor Core GPU Architecture Whitepaper"),
+        _document("arxiv_attention", "Attention Is All You Need"),
+        _document("arxiv_tapas", "TAPAS: Weakly Supervised Table Parsing via Pre-training"),
+        _document("ipcc_ar6_wg1_spm", "IPCC AR6 WGI Summary", "IPCC"),
+        _document("rp2040_datasheet", "RP2040 Datasheet", "Raspberry Pi"),
+        _document("nasa_seh", "NASA Systems Engineering Handbook", "NASA"),
+    ]
+
+    # "architecture" and "table" are everywhere; the names are not.
+    BODIES = {
+        "nvidia_ampere_wp": {"architecture", "table", "gpu", "ampere", "streaming"},
+        "arxiv_attention": {"architecture", "table", "transformer", "encoder"},
+        "arxiv_tapas": {"architecture", "table", "parsing", "denotation"},
+        "ipcc_ar6_wg1_spm": {"architecture", "table", "warming", "emissions"},
+        "rp2040_datasheet": {"architecture", "table", "register", "gpio"},
+        "nasa_seh": {"architecture", "table", "verification", "lifecycle"},
+    }
+
+    @pytest.fixture
+    def resolver(self):
+        return MetadataResolver.from_documents(self.DOCUMENTS, body_terms=self.BODIES)
+
+    @pytest.fixture
+    def blind(self):
+        """The old behaviour: titles only, no corpus statistics."""
+        return MetadataResolver.from_documents(self.DOCUMENTS)
+
+    def test_architecture_no_longer_narrows(self, resolver):
+        """The defect that broke retrieval of the Transformer architecture figure."""
+        assert resolver.resolve("Transformer model architecture diagram").doc_ids is None
+
+    def test_table_no_longer_narrows_onto_the_table_parsing_paper(self, resolver):
+        """The defect that halved Method 2's table recall.
+
+        Every question containing the word "table" was filtered to TAPAS.
+        """
+        assert resolver.resolve("Which table lists confirmed cases?").doc_ids is None
+
+    def test_without_corpus_statistics_the_defect_is_reproduced(self, blind):
+        """Documents the degradation, so the fix is not silently bypassable."""
+        assert blind.resolve("Transformer model architecture diagram").doc_ids == [
+            "nvidia_ampere_wp"
+        ]
+        assert blind.resolve("Which table lists confirmed cases?").doc_ids == ["arxiv_tapas"]
+
+    def test_a_real_identifier_still_narrows(self, resolver):
+        assert resolver.resolve("what does the IPCC say about warming").doc_ids == [
+            "ipcc_ar6_wg1_spm"
+        ]
+        assert resolver.resolve("what is the RP2040 clock speed").doc_ids == [
+            "rp2040_datasheet"
+        ]
+
+    def test_a_rare_title_word_is_still_a_signal(self, resolver):
+        """Only *widespread* words are dropped; distinctive ones survive."""
+        assert resolver.resolve("weakly supervised parsing").doc_ids == ["arxiv_tapas"]
+
+    def test_dropped_terms_are_reported(self, resolver):
+        assert {"architecture", "table"} <= resolver.generic_terms
+        assert resolver.describe()["corpus_statistics"] is True
+        assert resolver.describe()["n_generic_terms_dropped"] >= 2
+
+    def test_no_corpus_statistics_is_reported_too(self, blind):
+        assert blind.generic_terms == frozenset()
+        assert blind.describe()["corpus_statistics"] is False
+
+    @pytest.mark.parametrize(
+        ("n_documents_containing", "expected_dropped"),
+        [(2, False), (3, True), (4, True)],
+    )
+    def test_the_threshold_boundary(self, n_documents_containing, expected_dropped):
+        """At the default 0.5, a term in half of six documents is dropped."""
+        docs = [_document(f"d{i}", f"Doc {i} Widget") for i in range(6)]
+        bodies = {
+            f"d{i}": ({"widget"} if i < n_documents_containing else set()) | {f"unique{i}"}
+            for i in range(6)
+        }
+        resolver = MetadataResolver.from_documents(docs, body_terms=bodies)
+        assert ("widget" in resolver.generic_terms) is expected_dropped
+
+    def test_the_threshold_is_configurable(self):
+        docs = [_document("a", "Alpha Widget"), _document("b", "Beta Gadget")]
+        bodies = {"a": {"widget"}, "b": {"widget"}}
+        assert "widget" in MetadataResolver.from_documents(docs, body_terms=bodies).generic_terms
+        loose = MetadataResolver.from_documents(
+            docs, body_terms=bodies, max_document_frequency=1.5
+        )
+        assert "widget" not in loose.generic_terms
+
+    def test_corpus_terms_builds_a_vocabulary_per_document(self):
+        from mmrag.retrieval.metadata import corpus_terms
+        from mmrag.schemas import BBox, Chunk, ChunkType
+
+        def chunk(doc, text, cid):
+            return Chunk(
+                chunk_id=cid, doc_id=doc, page_number=1, chunk_type=ChunkType.TEXT,
+                text=text, element_ids=[f"{doc}#p1#t000"],
+                bbox=BBox(x0=0.1, y0=0.1, x1=0.9, y1=0.4), variant="method2",
+            )
+
+        vocab = corpus_terms([chunk("a", "Alpha Beta", "c1"), chunk("a", "Gamma", "c2"),
+                              chunk("b", "Beta", "c3")])
+        assert vocab == {"a": {"alpha", "beta", "gamma"}, "b": {"beta"}}
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -517,3 +634,4 @@ class TestImageEmbedderDimension:
         """This path reads .dimension, so it must not recurse into probing."""
         embedder = self._embedder(self._SilentModel(512))
         assert embedder.embed_queries([]).shape == (0, 512)
+
