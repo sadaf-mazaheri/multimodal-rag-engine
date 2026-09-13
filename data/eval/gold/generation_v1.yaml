@@ -1,0 +1,393 @@
+# Generation gold set, version 1 -- a sidecar to data/eval/gold/v1.yaml.
+#
+# v1.yaml says WHERE an answer lives and is left byte-identical, since the
+# published retrieval numbers were computed against it. This file says WHAT the
+# answer is, plus questions the corpus cannot answer, so generated answers can be
+# judged for correctness, completeness and refusal behaviour.
+#
+# required_facts are short atomic facts copied from the evidence pages, not
+# written from memory. Atomic so completeness is scored fact by fact and a
+# correct paraphrase is not penalised for wording. They are also the judge's
+# reference, so correctness never depends on outside knowledge.
+#
+# Every entry was checked against the chunk text in the built index. NEEDS
+# REVIEW marks an entry whose facts could not be taken cleanly from the v1
+# evidence page -- usually because the page does not in fact carry the answer.
+# Those are findings about the retrieval gold, recorded here rather than acted
+# on, because v1.yaml is frozen.
+#
+# Validate with:  mmrag eval validate
+
+version: 1
+description: >
+  Required facts for the 42 retrieval gold queries and 8 unanswerable questions,
+  for evaluating generated answers produced from retrieved sources.
+retrieval_gold: data/eval/gold/v1.yaml
+
+queries:
+
+  # --- stratum: text ----------------------------------------------------------
+
+  q001:
+    required_facts:
+      - the model has no recurrence and no convolution, so information about token position must be injected
+      - positional encodings are added to the input embeddings
+      - the encodings use sine and cosine functions of different frequencies
+    note: p6 section 3.5, verbatim.
+
+  q002:
+    required_facts:
+      - late interaction computes similarity with individual query token embeddings
+      - it benefits from the rich interaction between individual query and document terms
+      - it keeps the offline computation and fast query matching of bi-encoders
+    note: p3, verbatim.
+
+  q003:
+    required_facts:
+      - the parametric memory is a pre-trained seq2seq model
+      - the non-parametric memory is a dense vector index of Wikipedia accessed with a pre-trained neural retriever
+    note: p1 abstract, verbatim.
+
+  q004:
+    required_facts:
+      - systems engineering is a methodical, multi-disciplinary approach for the design, realization, technical management, operations, and retirement of a system
+      - a system is the combination of elements that function together to produce the capability required to meet a need
+    note: p13, verbatim.
+
+  q005:
+    required_facts:
+      - RP stands for Raspberry Pi
+      - the 2 is the number of processor cores
+      - the first 0 is the type of core, such as Cortex-M0+
+      - the 4 is floor(log2(RAM / 16kB))
+      - the final 0 is floor(log2(nonvolatile / 128kB)), or 0 if there is no onboard nonvolatile storage
+    note: >
+      NEEDS REVIEW. The v1 evidence page (p9) does not contain the answer: its
+      text stops at "The post-fix numeral on RP2040 comes from the following,".
+      The explanation is on p10, as the text of Figure 1. Facts are taken from
+      p10. The v1 evidence for q005 should probably be p10, or p9 and p10.
+
+  q006:
+    required_facts:
+      - Berkshire's insurance business set records in sales, float and underwriting profits last year
+      - property-casualty insurance provides the core of Berkshire's well-being and growth
+    note: >
+      NEEDS REVIEW. p16 does not explain HOW float contributes to growth; it
+      only reports record float and that P/C insurance is the core of growth.
+      Facts are limited to what the page states, so a faithful answer can only
+      be partial and an answer explaining the float mechanism is unsupported.
+
+  q007:
+    required_facts:
+      - it is unequivocal that human influence has warmed the atmosphere, ocean and land
+      - widespread and rapid changes in the atmosphere, ocean, cryosphere and biosphere have occurred
+    note: p4 statement A.1, verbatim.
+
+  q008:
+    required_facts:
+      - question answering over tables is usually treated as a semantic parsing task that translates the question into a logical form
+      - training semantic parsers from weak supervision is difficult because of spurious logical forms and reward sparsity
+      - TAPAS answers questions over tables without generating logical forms
+    note: p1 abstract and introduction of the corrected TAPAS PDF (arXiv 2004.02349), verbatim.
+
+  q009:
+    required_facts:
+      - from 31 December 2019 to 3 January 2020, 44 case-patients with pneumonia of unknown etiology were reported in China
+      - as of 20 January 2020, 282 confirmed cases were reported from four countries
+      - the cases in Thailand, Japan and the Republic of Korea were exported from Wuhan City, China
+    note: p1, verbatim.
+
+  q010:
+    required_facts:
+      - each third-generation A100 Tensor Core performs 256 FP16/FP32 FMA operations per clock
+      - an A100 SM has four Tensor Cores delivering 1024 FMA operations per clock
+      - this is a 2x increase in computation per SM compared to Volta and Turing
+    note: p20, verbatim.
+
+  # --- stratum: table (locator questions) -------------------------------------
+
+  q011:
+    required_facts:
+      - Table 3, Variations on the Transformer architecture, reports the BLEU scores
+      - the metrics are on the English-to-German development set newstest2013
+    note: p9 table caption, verbatim.
+
+  q012:
+    required_facts:
+      - Table 1 lists countries, territories or areas with reported confirmed cases of 2019-nCoV as of 20 January 2020
+      - the table reports 282 total confirmed cases
+    note: p2 table, verbatim.
+
+  q013:
+    required_facts:
+      - Table SPM.2 gives the estimates of historical CO2 emissions and remaining carbon budgets
+      - remaining carbon budgets are calculated from the beginning of 2020 until global net zero CO2 emissions are reached
+    note: p29 table caption, verbatim.
+
+  q014:
+    required_facts:
+      - Table SPM.1 gives the assessed changes in global surface temperature
+      - it covers selected 20-year periods and the five illustrative emissions scenarios
+      - the changes are relative to the 1850-1900 average
+    note: p14 table caption, verbatim.
+
+  q015:
+    required_facts:
+      - Table 2 contains the comprehensive evaluation on ViDoRe
+      - results are reported using nDCG@5
+    note: p7 table caption, verbatim.
+
+  q016:
+    required_facts:
+      - the GPIO function table lists function names including SPIx, UARTx, I2Cx, PWMx A/B and SIO
+      - SPIx connects one of the internal PL022 SPI peripherals to GPIO
+    note: p14 table. It has no numbered caption, so the facts identify it by content.
+
+  q017:
+    required_facts:
+      - the pin table describes GPIOx as general-purpose digital input and output
+      - GPIOx/ADCy pins add an analogue-to-digital converter function
+    note: p12 table. No numbered caption; identified by content.
+
+  q018:
+    required_facts:
+      - the insurance-underwriting table reports property/casualty premiums earned of $21,938 in 2023
+      - property/casualty pre-tax underwriting earnings were $3,508 in 2023
+    note: >
+      p63 (printed K-63) table, verbatim. Amounts are as printed; the chunk does
+      not state the unit, so an answer adding "million" is not contradicting it.
+
+  # --- stratum: figure (locator questions) ------------------------------------
+
+  q019:
+    required_facts:
+      - Figure 1 shows the Transformer model architecture
+      - the encoder and decoder are stacks of N layers built from multi-head attention and feed-forward sublayers with Add & Norm
+      - the decoder uses masked multi-head attention
+      - positional encodings are added to the input and output embeddings, and a linear layer with softmax produces output probabilities
+    note: p3 figure caption and OCR labels.
+
+  q020:
+    required_facts:
+      - Figure 22 is an example MIG compute configuration with three GPU Instances
+      - the GPU is divided into seven GPU slices
+    note: p48 figure caption and OCR labels (GPU Slice 0 to 6).
+
+  q021:
+    required_facts:
+      - Figure 1 gives the overview of the RAG approach
+      - it combines a pre-trained retriever, a query encoder and document index, with a pre-trained seq2seq generator fine-tuned end to end
+      - Maximum Inner Product Search (MIPS) is used to find the top-K documents
+    note: p2 figure caption, verbatim.
+
+  q022:
+    required_facts:
+      - Fig. 2 shows the accuracy of AlphaFold on recent PDB structures
+      - the analysed structures are newer than any structure in the training set
+      - the overall median backbone r.m.s.d. is 1.46 Å
+    note: p3 figure caption, verbatim.
+
+  q023:
+    required_facts:
+      - Fig. 3 shows AlphaFold's architectural details, with the Evoformer block in panel a
+      - the Evoformer stack has 48 blocks with no shared weights
+      - it includes triangle multiplicative update and triangle self-attention
+    note: p4 figure caption and OCR labels.
+
+  q024:
+    required_facts:
+      - Figure SPM.6 shows projected changes in the intensity and frequency of hot temperature extremes over land
+      - it also covers extreme precipitation over land and agricultural and ecological droughts in drying regions
+      - it shows 10-year and 50-year events at increasing global warming levels
+    note: p18 figure caption and OCR labels.
+
+  q025:
+    required_facts:
+      - Figure 1 shows total energy-related carbon dioxide emissions
+      - emissions are in million metric tons, with history and projections to 2050
+      - the cases shown include the Reference case, High Economic Growth-High ZTC and Low Economic Growth-Low ZTC
+    note: p12 figure OCR text (words run together in the OCR, content verbatim).
+
+  q026:
+    required_facts:
+      - FIGURE 2.1-1 shows the Systems Engineering Engine (NPR 7123.1)
+      - it groups processes into technical management, system design and product realization processes
+    note: p16 figure caption and OCR labels.
+
+  q042:
+    required_facts:
+      - the chart shows the monthly unemployment rate in percent
+      - it breaks the rate down by race and ethnicity
+      - the data source is the Bureau of Labor Statistics via Haver Analytics
+    note: p19 figure note and source lines. No figure number appears in the chunk.
+
+  # --- stratum: natural ---------------------------------------------------------
+
+  q027:
+    required_facts:
+      - headline inflation in the euro area was 2.9% in December 2023
+      - it was down from 9.2% in December 2022
+    note: p7 "year at a glance" infographic, OCR text, verbatim.
+
+  q028:
+    required_facts:
+      - RP2040 has two processor cores
+      - the cores are ARM Cortex-M0+
+      - they run at 133MHz
+    note: p9 key features, verbatim.
+
+  q029:
+    required_facts:
+      - RAG set the state of the art on three open-domain QA tasks, outperforming parametric seq2seq models
+      - RAG generates more specific, diverse and factual language than a parametric-only seq2seq baseline
+      - knowledge held in non-parametric memory can be directly revised and expanded
+    note: p1 abstract and introduction, verbatim.
+
+  q030:
+    required_facts:
+      - Thailand reported 2 confirmed cases
+      - Japan reported 1 confirmed case
+      - the Republic of Korea reported 1 confirmed case
+      - the cases in Thailand, Japan and the Republic of Korea were exported from Wuhan City, China
+    note: p1 situation update, verbatim.
+
+  q031:
+    required_facts:
+      - verification shows proof of compliance with requirements, through test, analysis, inspection or demonstration
+      - validation shows that the product accomplishes its intended purpose in the intended environment
+    note: p21, verbatim.
+
+  q032:
+    required_facts:
+      - the big Transformer's BLEU score is given with its evaluation set, either 26.4 on the English-to-German newstest2013 development set or 28.4 on the WMT 2014 English-to-German test set
+    note: >
+      NEEDS REVIEW. The question does not say development or test. The v1
+      evidence (Table 3, p9) gives the big model 26.4 BLEU on the dev set, but
+      p1 and p8 give 28.4 BLEU on the WMT 2014 English-to-German test set, the
+      paper's headline number. Both are correct readings, so the one fact
+      accepts either, provided the evaluation set is stated.
+
+  q033:
+    required_facts:
+      - 278 confirmed cases were reported in China
+      - 258 of them were in Hubei Province
+    note: p2 Table 1 rows (Hubei 258, Guangdong 14, Beijing 5, Shanghai 1).
+
+  q034:
+    required_facts:
+      - about 500 GtCO2 can still be emitted from the beginning of 2020 for a 50% likelihood of limiting warming to 1.5°C
+      - the budget is 400 GtCO2 for a 67% likelihood
+    note: p29 Table SPM.2, 1.5°C row (900 / 650 / 500 / 400 / 300 at 17 / 33 / 50 / 67 / 83%).
+
+  q035:
+    required_facts:
+      - the RP2040's internal SPI peripherals are PL022
+      - the SPIx function connects an SPI peripheral to GPIO pins
+    note: p14 function table, verbatim.
+
+  q036:
+    required_facts:
+      - Multi-Instance GPU (MIG) partitions the GPU into separate GPU Instances
+      - each user or workload is mapped to its own GPU Instance
+      - a GPU can be divided into seven GPU slices
+    note: Derived from the diagram OCR labels on p47 (USER0 to USER6 against GPU Instance 0 to 6) and p48 (GPU Slice 0 to 6).
+
+  q037:
+    required_facts:
+      - under the very high emissions scenario SSP5-8.5, global surface temperature is projected to be about 4.4°C above 1850-1900 in 2081-2100
+    note: >
+      NEEDS REVIEW, twice over. First, the 4.4°C value is not in the p22 figure
+      chunk text, which carries only axis and scenario labels; it is in Table
+      SPM.1 on p14 (4.4, very likely 3.3 to 5.7). A text-only generator that
+      retrieves p22 alone cannot state it from its sources. Second, the IPCC's
+      own wording names SSP3-7.0 "high" and SSP5-8.5 "very high" GHG emissions,
+      so "the high emissions scenario" read literally is SSP3-7.0 (3.6°C, very
+      likely 2.8 to 4.6). The fact follows the manual review decision, SSP5-8.5.
+
+  q038:
+    required_facts:
+      - AlphaFold's median backbone accuracy on CASP14 was 0.96 Å r.m.s.d.95
+      - the next best performing method had a median backbone accuracy of 2.8 Å r.m.s.d.95
+    note: >
+      NEEDS REVIEW. The comparison numbers are in the p2 TEXT, while the v1
+      evidence is the p2 FIGURE, whose caption only says AlphaFold was compared
+      with the top-15 of 146 CASP14 entries on 87 domains. Same page, different
+      modality, so an answer grounded in the p2 text is correct but will not
+      count as gold evidence in context.
+
+  q039:
+    required_facts:
+      - Figure 2 shows U.S. electricity generation by select technologies for all cases
+      - the technologies shown are solar, wind, natural gas, nuclear and coal, in billion kilowatthours
+    note: >
+      NEEDS REVIEW. The question asks how generation changes by 2050, but the
+      direction of change is visible only in the plotted lines; the chunk text
+      carries labels, not trends. A text-only generator cannot support a trend
+      claim from this page, so facts are limited to what the figure states.
+
+  q040:
+    required_facts:
+      - FIGURE 2.0-1 shows systems engineering in the context of overall project management
+      - systems engineering and project management share common areas including stakeholders, risks, configuration management, data management, reviews and schedule
+    note: p15 figure caption and OCR labels.
+
+  q041:
+    required_facts:
+      - job gains averaged 248,000 per month over the first five months of the year
+      - the unemployment rate remained low
+      - the unemployment rate edged up to 4.0 percent in May
+    note: p7 summary, verbatim.
+
+# --- unanswerable: the correct response is a refusal -----------------------------
+# Each is near a corpus document's topic, so retrieval returns related but
+# insufficient context -- which is what tests whether the generator guesses.
+# Absence cannot be proven across 951 pages; each note records the check made.
+
+unanswerable:
+
+  - id: u001
+    query: What BLEU score did the Transformer achieve on English-to-Chinese translation?
+    note: >
+      The Transformer paper evaluates English-to-German and English-to-French
+      only. Corpus search for "English-to-Chinese", "Chinese translation" and
+      "Zh": no hits. Tempting: BLEU results for the other language pairs will be
+      retrieved.
+
+  - id: u002
+    query: How does AlphaFold 3 extend AlphaFold to protein-ligand complexes?
+    note: >
+      The corpus holds the 2021 AlphaFold paper only. "AlphaFold 3",
+      "AlphaFold3" and "AlphaFold-Multimer": no hits corpus-wide.
+
+  - id: u003
+    query: How many GPIO pins does the RP2350 have?
+    note: >
+      The datasheet covers the RP2040 only. "RP2350": no hits corpus-wide.
+      Tempting: the RP2040's "30 GPIO pins" will be retrieved.
+
+  - id: u004
+    query: What accuracy did TAPAS achieve on the Spider dataset?
+    note: >
+      TAPAS is evaluated on SQA, WikiSQL and WikiTQ. "Spider": no hits
+      corpus-wide.
+
+  - id: u005
+    query: What is the budget of NASA's Artemis program according to the systems engineering handbook?
+    note: '"Artemis": no hits corpus-wide.'
+
+  - id: u006
+    query: How many transistors does the NVIDIA H100 GPU have?
+    note: >
+      The whitepaper covers the A100 only. "H100" and "Hopper": no hits.
+      Tempting: the A100's "54 billion transistors" appears in Figure 2 on p10.
+
+  - id: u007
+    query: By how much did RAG outperform GPT-4 on Natural Questions?
+    note: >
+      The RAG paper (2020) predates GPT-4. "GPT-4" does not appear in it; its
+      one corpus hit is an unrelated ColPali dataset note (p16). Tempting:
+      Natural Questions results against other baselines will be retrieved.
+
+  - id: u008
+    query: What systems engineering lessons does the NASA handbook draw from the James Webb Space Telescope?
+    note: '"James Webb": no hits corpus-wide.'
