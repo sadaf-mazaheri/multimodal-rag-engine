@@ -17,7 +17,7 @@ The question this repo tries to answer is not "can we chat with a PDF" — it is
 | **Text** | BM25 + dense hybrid | BM25 + dense | BM25 + dense |
 | **Tables** | → Markdown, then text retrieval | structure-aware retrieval | structure-aware retrieval |
 | **Figures** | → caption + OCR text | CLIP image embeddings | CLIP + ColQwen2 page vectors |
-| **Fusion** | RRF over 2 retrievers + rerank | two-stage RRF + modality-floored rerank | two-stage RRF + rerank |
+| **Fusion** | RRF over 2 retrievers + rerank | best-route within each modality, RRF across, modality-floored rerank | *not yet implemented* |
 | **Generation** | text LLM | text LLM | **VLM, with original page images attached** |
 | **Measures** | the cost of flattening | the value of preserving modality | the value of seeing the page |
 
@@ -32,8 +32,12 @@ This project is being built in stages. Current state:
 - [x] **Step 2** — Shared ingestion: PDF → elements with rich metadata and provenance
 - [x] **Step 3** — Method 1: Textified hybrid RAG
 - [x] **Step 4** — Method 2: Modality-aware retrieval + query router
-- [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2)
-- [ ] **Step 6** — Evaluation harness and comparison report
+- [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2) — *not implemented yet*
+- [x] **Step 6** — Evaluation harness: retrieval metrics, then generation scored by an LLM judge
+
+Step 6 was built before Step 5 on purpose: two methods with no numbers were
+already one too many, and the evaluation turned up a corpus error and two
+retrieval defects that would otherwise have been carried into Method 3.
 
 ---
 
@@ -147,7 +151,13 @@ difference in their numbers comes from the pipeline and not from a silently
 re-issued PDF. If an upstream document changes, the download fails loudly with a
 hash mismatch rather than quietly indexing different bytes.
 
-**1,623 pages across 14 documents** (954 after the `page_limit` caps).
+**1,620 pages across 14 documents** (951 after the `page_limit` caps).
+
+The lockfile guarantees the bytes match, not that they are the *right* bytes. One
+entry paired the TAPAS title with the URL of a different paper (ETC, arXiv
+2004.08483), and the hash check passed because it verifies whatever it is told to
+fetch. It surfaced during gold-set review, when a TAPAS question had no TAPAS
+text to point at. The URL now resolves to arXiv 2004.02349.
 
 Fourteen documents, chosen so each modality is genuinely stressed and results
 can be sliced by document character:
@@ -201,17 +211,17 @@ mmrag ingest show arxiv_attention -t caption -g   # inspect with geometry
 mmrag ingest status                  # per-document counts from Postgres
 ```
 
-**954 pages → 16,005 elements**, mean extraction confidence **0.94**, 0.3% below 0.5:
+**951 pages → 15,992 elements**, mean extraction confidence **0.94**, 0.3% below 0.5:
 
 | | count | | count |
 |---|---:|---|---:|
-| text | 12,230 | tables | 438 |
-| headings/titles | 1,286 | charts | 165 |
-| captions | 688 | figures | 189 |
+| text | 12,217 | tables | 437 |
+| headings/titles | 1,285 | charts | 163 |
+| captions | 694 | figures | 187 |
 | headers/footers | 994 | diagrams | 15 |
 
-Table types skew register (171) and financial (148); figure types are chart (165),
-unknown (147), photo (42), diagram (15). **`unknown` is a deliberate answer** —
+Table types skew register (171) and financial (148); figure types are chart (163),
+unknown (145), photo (42), diagram (15). **`unknown` is a deliberate answer** —
 Method 2 routes on `figure_type`, so a confidently wrong label misdirects
 retrieval while an honest abstention merely fails to help.
 
@@ -226,9 +236,10 @@ single page cannot distinguish a running header from a section heading, nor a
 document's typography has been observed.
 
 Output goes to Postgres *and* to a JSON sidecar per document under
-`data/processed/`. The sidecar exists because Method 3's visual index is built
-on a Colab GPU with no access to a local database, and because debugging a parse
-should not require SQL. Both are written from the same objects, so they cannot drift.
+`data/processed/`. The sidecar exists so an index can be built on a machine with
+no database — Method 3's visual index is planned to be built that way on a GPU —
+and because debugging a parse should not require SQL. Both are written from the
+same objects, so they cannot drift.
 
 ### Extraction problems this had to solve
 
@@ -284,8 +295,8 @@ answer whose citations resolve back to a page and bounding box.
 
 ### What the baseline can't see
 
-Building the index over the full corpus produces **2,968 chunks** (2,190 text,
-446 table, 332 figure) from 954 pages — and reports the headline measurement:
+Building the index over the full corpus produces **2,947 chunks** (2,174 text,
+445 table, 328 figure) from 951 pages — and reports the headline measurement:
 
 > **37 figures have no retrievable text at all.**
 
@@ -295,13 +306,13 @@ unreachable* for this architecture. That number is the mechanism behind any
 deficit Method 3 later makes up, and it is why `FlattenReport` counts and
 attributes losses instead of silently dropping them.
 
-**Getting to 37 took two fixes, and both mattered more than the retrieval
-work.** It began at 147. A table-degeneracy bug was emitting register
-description tables as textless "charts"; fixing it took the figure to 118 and
-moved 83 tables back where they belonged. Implementing the OCR pass then
-recovered text from 81 more. Every one of those 164 figures was text that the
-textified baseline should always have had — so had the comparison been run
-first, Method 2's image retriever would have been credited for recovering
+**Getting to 37 took two ingestion fixes, and both had to come before any
+comparison.** It began at 147. A table-degeneracy bug was emitting register
+description tables as textless "charts"; fixing it took the figure to 118, and
+reclassified 83 elements from chart to table along the way. Implementing the OCR
+pass then recovered text from 81 more. Every one of those 110 figures was text
+that the textified baseline should always have had — so had the comparison been
+run first, Method 2's image retriever would have been credited for recovering
 content that belonged to Method 1 by right. An ingestion gap masquerading as an
 architectural result is the failure mode this project most needed to avoid.
 
@@ -376,7 +387,7 @@ mmrag query "What does the architecture diagram show?" -c method2 --provider ech
 
 ### What Method 2 can do that Method 1 structurally cannot
 
-Method 1 reports **37 of 369 figures with no retrievable text**: no caption, and
+Method 1 reports **37 of 365 figures with no retrievable text**: no caption, and
 nothing OCR could recover. No text index can reach them under any query.
 
 **All 37 have a cropped image on disk.** CLIP puts images and text in one space,
@@ -410,6 +421,23 @@ Each modality's own signals are fused first — `bm25 + dense → text`,
 `content + schema → table`, `CLIP + figure text → image` — and only then are the
 three modalities fused together.
 
+The two stages combine differently, because the lists mean different things.
+**Across modalities** they are independent votes, so agreement is evidence and
+contributions are summed (standard RRF). **Within table and image** the two
+signals are alternative routes to the *same* evidence — a figure found by its
+pixels or by its caption is one figure — so the better route decides
+(`combine="max"`). Text's `bm25 + dense` still sums.
+
+That split was a fix, not the original design. Summing inside the image
+retriever capped any figure only one signal could see at `1/(k+1)`, however
+perfect the match, so a figure ranked **first** by figure-text alone lost to
+anything mid-table in both lists and was demoted to 23rd, 29th or 39th — below
+the rerank floor, so the cross-encoder never judged it. It bit hardest on the 37
+figures with no text at all, which are structurally absent from the figure-text
+index. Once the demoted figures reached the pool, the cross-encoder ranked three
+of them first or second (scores +0.86 to +0.998): it could always identify them,
+and had simply never been shown them.
+
 The reason is arithmetic. RRF adds a contribution per ranked list, so a modality
 supplying two lists got twice the votes. Table and image already fused
 internally; text did not, which handed it a **2.86× score ceiling** over image
@@ -427,6 +455,8 @@ So the cross-encoder arbitrates, and every fired modality is guaranteed a floor
 in the pool it sees (`rerank_pool_per_modality`, default 8). It can abstain,
 because it reads query and passage together.
 
+On a 9-query sanity check run while designing it:
+
 | | figure answers found | table | text purity |
 |---|---:|---:|---:|
 | before | 0/5 | 1/1 | 100% |
@@ -437,9 +467,24 @@ reranking disabled there is no floor — a quota with no arbiter would promote
 evidence nothing vouched for — and fusion falls back to plain `top_k`.
 
 **Both methods now rerank identically**, so a head-to-head no longer mixes the
-modality-aware effect with the reranker effect. On CPU the cross-encoder costs
-~17.6 s per query against ~150–280 ms for retrieval; both methods pay it, but
-neither is interactive without a GPU.
+modality-aware effect with the reranker effect. On CPU the cross-encoder
+dominates latency — median ~18 s per query for either method, against roughly
+100–250 ms for retrieval itself — so neither is interactive without a GPU.
+
+### Document resolution
+
+Method 2 can narrow a query to the documents it names ("what does the IPCC
+report say…" becomes a `doc_id` filter). It originally judged a word to be a name
+if it was unique among the fourteen titles — which is not the same as being
+rare. `table` appears in one title and every body, so *"which table lists
+confirmed cases"* was filtered onto the table-parsing paper; `architecture` sent
+*"Transformer model architecture diagram"* to the NVIDIA whitepaper. Over the
+gold set, 8 of 30 narrowings excluded the document holding the answer.
+
+A title word now counts only if it appears in fewer than half the corpus
+**bodies**. That removed all 8 wrong narrowings while keeping all 22 correct
+ones; the resolver otherwise abstains. It is on by default, and `--no-metadata`
+ablates it.
 
 ### Routing
 
@@ -481,16 +526,238 @@ of the questions rather than the retrieval architecture.
 
 ### Method 1 is frozen
 
-Method 2 adds no changes to Method 1's retrieval or generation. It writes to its
-own chunk variant and its own Qdrant collections, so both indexes coexist and
-either can be rebuilt independently. `HybridRetriever` and Method 2's
+Method 1's retrieval and generation code is unchanged by Method 2. Method 2 writes
+to its own chunk variant and its own Qdrant collections, so both indexes coexist
+and either can be rebuilt independently. `HybridRetriever` and Method 2's
 `BM25Retriever`/`DenseRetriever` deliberately duplicate a little logic rather
 than share a base class, because factoring them together would have meant
 editing Method 1 after its numbers were recorded.
 
+Two things did change Method 1, deliberately and on the record. Its
+**configuration** enables the same cross-encoder as Method 2, so reranking is not
+a second difference between them. And its **chunk set** moved with shared
+ingestion — the table-degeneracy fix, OCR, and the corpus correction.
+`tests/baselines/method1_chunks.txt` pins the current set, so any further
+movement fails a test rather than passing unnoticed. The two Method 2 retrieval
+fixes above were checked against this: `method1/rerank` is bit-identical across
+every metric before and after them.
+
 **See [`docs/architecture.md`](docs/architecture.md)** for the full component
 ownership table — what is shared, what belongs to each method, and the
 asymmetries that Step 6 has to control for.
+
+---
+
+## Evaluation
+
+```bash
+mmrag eval validate                               # gold evidence resolves against the index
+mmrag eval run -c method1 --tag rerank
+mmrag eval run -c method2 --tag rerank
+mmrag eval run -c method2 --no-metadata --tag rerank-nometa
+mmrag eval compare data/eval/runs/*.json          # first file is the baseline
+```
+
+Retrieval only: no provider is called and nothing is generated, so a run is free,
+offline and deterministic. Generation quality is evaluated separately, from these
+same saved runs — see [Generation evaluation](#generation-evaluation).
+
+**The gold set** (`data/eval/gold/v1.yaml`) is 42 hand-verified queries over all 14
+documents. Evidence is `(doc_id, page, modality)` — not chunk ids, which differ
+between the methods by construction, and not element ids, which shift whenever
+detection changes. Every entry records how its page was verified.
+
+Queries carry two separate labels: how the question is *phrased*
+(text / table / figure / natural) and where the answer *lives*
+(text / table / figure). `natural` questions name no modality, and matter most:
+an explicitly phrased question hands the router its answer.
+
+### Retrieval results
+
+Both methods rerank with the same cross-encoder. Macro-averaged over 42 queries:
+
+| run | Recall@1 | Recall@10 | MRR | nDCG@10 |
+|---|---:|---:|---:|---:|
+| Method 1 | 0.405 | 0.881 | 0.555 | 0.633 |
+| **Method 2** | **0.405** | **0.929** | **0.571** | **0.656** |
+| Method 2, `--no-metadata` | 0.405 | 0.929 | 0.569 | 0.655 |
+
+Recall@10 by where the answer lives:
+
+| run | text (n=15) | table (n=12) | figure (n=15) |
+|---|---:|---:|---:|
+| Method 1 | 1.000 | 1.000 | 0.667 |
+| **Method 2** | 1.000 | 1.000 | **0.800** |
+| Method 2, `--no-metadata` | 1.000 | 1.000 | 0.800 |
+
+Latency per query, end to end:
+
+| run | median | p90 |
+|---|---:|---:|
+| Method 1 | 18,368 ms | 24,788 ms |
+| Method 2 | 17,887 ms | 18,539 ms |
+
+**Method 2 leads on Recall@10, MRR and nDCG@10. Recall@1 is tied.** The whole
+difference is on figures — text and table are both saturated — which is where the
+modality-aware design was supposed to earn its keep.
+
+Read these with the sample size in mind. 42 queries is enough to catch a defect,
+not to establish significance: the figure slice is 15 queries, so the 0.667 →
+0.800 gap is **two queries**. The `--no-metadata` arm now differs from Method 2
+only in the third decimal place, which is the point of the resolver fix — it was
+worth +0.167 Recall@10 as an ablation before the fix and costs nothing after.
+Latency is dominated by the CPU cross-encoder, not by either method's retrieval.
+
+**These are not the first numbers this harness produced.** The first run had
+Method 1 ahead, 0.857 to 0.595. Between that run and this one, three things were
+fixed — and none was a change to the modality-aware design:
+
+| fix | Method 2 Recall@10 |
+|---|---:|
+| first run | 0.595 |
+| corpus: `arxiv_tapas` pointed at the wrong paper | 0.619 |
+| document resolution: generic title words | 0.786 |
+| within-modality fusion: best route instead of sum | **0.929** |
+
+That is the reason the harness was built before Method 3. Pre-fix results are
+kept in `data/eval/pre_corpus_fix_baseline.md` and are not comparable, since the
+corpus has changed since.
+
+---
+
+## Generation evaluation
+
+```bash
+mmrag eval generate --retrieval-run data/eval/runs/<run>.json --dry-run \
+    --price-in <usd-per-1M> --price-out <usd-per-1M>          # projected cost; calls nothing
+mmrag eval generate --retrieval-run data/eval/runs/<run>.json
+mmrag eval judge --generation-run data/eval/generation/<run>_generation.json
+mmrag eval compare data/eval/generation/*_judged.json --markdown
+```
+
+Retrieval results say whether the evidence was *found*. Generation results say
+whether the model then *answered correctly from it*. They are separate runs
+with separate records, and neither is folded into the other.
+
+**Answers are generated from saved retrieval runs, not by retrieving again.** The
+exact chunks a retrieval run scored are rebuilt by id, so both numbers describe
+the same retrieved list. A run whose chunk ids no longer exist in the index is
+refused. The only exception is the 8 unanswerable questions, which appear in no
+retrieval run: they are retrieved live with the run's own configuration, and
+their lists are stored with the answers.
+
+**The generation gold** (`data/eval/gold/generation_v1.yaml`) is a sidecar, so
+`v1.yaml` and the retrieval numbers above stay untouched. It holds 105 short
+atomic facts for the 42 queries, copied from the indexed corpus text, plus 8
+unanswerable questions whose correct response is a refusal. Atomic facts mean
+completeness is scored fact by fact and a correct paraphrase is not penalised
+for its wording.
+
+**The judge observes; Python scores.** The judge sees the question, the sources
+exactly as the generator saw them, the answer and the reference facts — never
+the method, retrieval scores or gold pages. It reports which facts are covered,
+which claims the sources support, and whether the answer declines. Every score
+is arithmetic over those observations:
+
+- **correctness** — 1 if every fact is covered, 0.5 if only some are, 0 if none
+  are or any is contradicted; refusals excluded.
+- **completeness** — the fraction of facts covered; a refusal covers none.
+- **grounded correct** — correct, *and* every claim supported by the sources.
+
+Both generation and judging use `gpt-4o-mini` at temperature 0 with seed 42, and
+every call goes through a content-addressed cache, so re-judging is free.
+
+### Generation results
+
+The three authoritative retrieval runs, each generated and judged over 42
+answerable and 8 unanswerable questions. All 150 answers were generated and
+judged with **zero generation errors, zero judge errors and zero repaired
+verdicts**.
+
+From retrieval to answer, over the 42 answerable questions. Rates are quoted as
+recorded in the judged run files, to four decimals:
+
+| run | gold evidence in prompt | grounded correct, given evidence | grounded correct, end to end |
+|---|---:|---:|---:|
+| Method 1 | 37/42 (0.8810) | 17/37 (0.4595) | 17/42 (0.4048) |
+| Method 2 | 39/42 (0.9286) | 19/39 (0.4872) | 19/42 (0.4524) |
+| **Method 2, `--no-metadata`** | 39/42 (0.9286) | **22/39 (0.5641)** | **22/42 (0.5238)** |
+
+"Gold evidence in prompt" equals Recall@10 from the retrieval results: no gold
+evidence was lost to the context budget in any run. No answer was judged
+grounded correct without its gold evidence in the prompt.
+
+| run | correctness | completeness | correct / partial / incorrect / refused |
+|---|---:|---:|---:|
+| Method 1 | 0.6282 | 0.5905 | 17 / 15 / 7 / 3 |
+| Method 2 | 0.6795 | 0.6341 | 19 / 15 / 5 / 3 |
+| **Method 2, `--no-metadata`** | **0.7179** | **0.6778** | 22 / 12 / 5 / 3 |
+
+Grounded correct by where the answer lives:
+
+| run | text (n=15) | table (n=12) | figure (n=15) |
+|---|---:|---:|---:|
+| Method 1 | 8 | 7 | 2 |
+| Method 2 | 8 | 7 | 4 |
+| Method 2, `--no-metadata` | 11 | 7 | 4 |
+
+Refusal behaviour:
+
+| run | unanswerable refused | answerable refused | refused despite sufficient context |
+|---|---:|---:|---:|
+| Method 1 | 8/8 | 3/42 | 3 |
+| Method 2 | 8/8 | 3/42 | 3 |
+| Method 2, `--no-metadata` | 8/8 | 3/42 | 2 |
+
+"Sufficient context" is the judge's reading of the sources. No run answered from
+context the judge considered insufficient.
+
+**Method 2 improves on Method 1, and in this run Method 2 without the
+MetadataResolver does best.** The first gain follows retrieval: Method 2 put gold
+evidence in front of the model for two more questions, and doubled grounded
+correct answers on figure questions (2 → 4).
+
+The second gain runs opposite to retrieval, where the two Method 2 arms are tied
+at 0.929 Recall@10. On three questions the resolver narrowed retrieval to one
+document — the IPCC report (q007), TAPAS (q008) and the WHO report (q009). The
+gold page still reached the prompt each time, but the rest of the context
+changed, and the answers were judged less complete than the unfiltered arm's.
+Scoping a query to the document it names can find the right page while starving
+the answer of context. Three questions are too few to act on, but they are
+exactly the ones worth checking.
+
+**These differences are directional, not significant.** There are 42 answerable
+questions, and slices hold 8 to 15: the whole spread between the best and worst
+run is five questions end to end.
+
+### Limitations
+
+- **Faithfulness is not measured meaningfully.** The judge is the same model as
+  the generator, and it found no unsupported claim in any of the 117 non-refused
+  answerable answers — faithfulness 1.00 and hallucination 0 in all three runs.
+  That is self-judge leniency, not evidence of perfect grounding, and those two
+  columns are left out above. Every absolute score here is directional; the
+  comparison between runs is the sturdier signal, since all arms share one
+  generator and one judge.
+- **Figure questions are answered from text alone.** Methods 1 and 2 retrieve
+  figures but send the generator only their captions and OCR text, never the
+  image. Questions phrased as "which figure shows…" score 0 of 9 grounded correct
+  in every run, because their reference facts describe what the figure depicts.
+  That gap is the one Method 3 exists to measure.
+- **Six generation-gold entries are still marked NEEDS REVIEW** — q005, q006,
+  q032, q037, q038 and q039. For each, the facts could not be taken cleanly from
+  the v1 evidence page — usually because that page does not carry the whole
+  answer. They are recorded in the file rather than corrected, because `v1.yaml`
+  is frozen, and the same entries apply to every arm.
+- **"Correct" is strict.** It needs every reference fact, so most failures are
+  partial answers rather than wrong ones: of Method 2's 20 answers that were
+  neither correct nor refused, 15 are partial.
+
+**Cost.** Generation and judging for all three runs made 216 provider calls — 108
+for each stage. Another 84 were served from the cache, since the Method 2 arms
+retrieve identically for most questions. At $0.15 / $0.60 per million
+input / output tokens, the recorded usage of the calls actually made comes to
+about **$0.14** in total: roughly $0.06 generating and $0.08 judging.
 
 ---
 
@@ -528,22 +795,30 @@ docs/architecture.md  which components are shared vs method-specific
   methods/          the three end-to-end pipelines
     method1_textified.py   (frozen)
     method2_modality.py
-  evaluation/       metrics, gold set, comparison report    (Step 6)
-notebooks/          Colab GPU notebook for Method 3 visual indexing
+  evaluation/       gold sets, retrieval metrics and runner, generation runner,
+                    LLM judge, response cache, comparison reports
+data/eval/gold/     versioned, hand-verified gold sets: retrieval + generation (committed)
+data/eval/runs/     retrieval run records (gitignored)
+data/eval/generation/  generation and judged run records (gitignored)
+data/eval/cache/    content-addressed LLM response cache (gitignored)
+tests/baselines/    frozen Method 1 chunk set
+notebooks/          reserved for Method 3 GPU indexing (empty -- not implemented)
 ```
 
 ---
 
 ## Hardware notes
 
-Everything except Method 3's visual index runs on CPU. `bge-small-en-v1.5` (384-d)
-is the default text embedder precisely because it is usable without a GPU.
+Everything implemented so far runs on CPU. `bge-small-en-v1.5` (384-d) is the
+default text embedder precisely because it is usable without a GPU. The one CPU
+cost that matters is the cross-encoder, which dominates query latency (see
+[Retrieval results](#retrieval-results)).
 
-ColQwen2 page embedding is the exception — on CPU it is roughly 1–5 s/page, which
-is impractical for a corpus of this size. `notebooks/` therefore contains a
-Colab/Kaggle notebook that builds the visual index on a free GPU and exports it
-for local use. The rest of Method 3 (fusion, reranking, generation) runs locally
-against that exported index.
+Method 3 is **not implemented yet**. The plan: ColQwen2 page embedding is roughly
+1–5 s/page on CPU, impractical for a corpus of this size, so the visual index
+would be built on a GPU (Colab/Kaggle) and exported for local use, with fusion,
+reranking and generation running locally against it. `notebooks/` is reserved for
+that and currently empty.
 
 ---
 
