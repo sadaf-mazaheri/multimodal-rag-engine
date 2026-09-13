@@ -988,16 +988,37 @@ def eval_compare(
     runs: list[str] = typer.Argument(..., help="Run JSON files; the first is the baseline"),
     markdown: bool = typer.Option(False, "--markdown", help="Emit the headline table as Markdown"),
 ) -> None:
-    """Compare saved runs. The first is treated as the baseline for deltas."""
+    """Compare saved runs. The first is treated as the baseline for deltas.
+
+    Takes either retrieval runs or judged generation runs, not a mix: the two
+    report different quantities over different query sets.
+    """
+    from mmrag.evaluation.generation_report import run_kind
     from mmrag.evaluation.report import load_run, render, to_markdown
 
-    loaded = []
     for path in runs:
-        try:
-            loaded.append(load_run(path))
-        except FileNotFoundError as exc:
-            raise typer.BadParameter(f"no run file at {path}") from exc
+        if not Path(path).exists():
+            raise typer.BadParameter(f"no run file at {path}")
+    kinds = {run_kind(path) for path in runs}
 
+    if kinds == {"judged"}:
+        from mmrag.evaluation.generation_report import render_judged, to_markdown_judged
+        from mmrag.evaluation.judged_eval import JudgedRun
+
+        judged = [JudgedRun.load(path) for path in runs]
+        render_judged(judged, console=console)
+        if markdown:
+            console.print("\n[dim]-- Markdown --[/]")
+            print(to_markdown_judged(judged))
+        return
+    if kinds != {"retrieval"}:
+        console.print(
+            f"[red]cannot compare run kinds {sorted(kinds)}.[/] Pass only retrieval runs or "
+            "only judged runs; a generation run must be judged first (mmrag eval judge)."
+        )
+        raise typer.Exit(code=1)
+
+    loaded = [load_run(path) for path in runs]
     render(loaded, console=console)
     if markdown:
         console.print("\n[dim]-- Markdown --[/]")
@@ -1016,6 +1037,26 @@ def _method_from_run(run: Any):
     if config.method not in builders:
         raise typer.BadParameter(f"{config.method} is not supported for generation")
     return config, builders[config.method](config)
+
+
+def _resolve_recorded_path(recorded: str | None) -> Path | None:
+    """A path recorded in a run file, as given or relative to the repository root.
+
+    Run files record paths as they were typed, usually relative to the root, so
+    a command started from another directory must not lose track of them.
+    """
+    if not recorded:
+        return None
+    path = Path(recorded)
+    if path.exists():
+        return path
+    if not path.is_absolute():
+        from mmrag.config import PROJECT_ROOT
+
+        rooted = PROJECT_ROOT / path
+        if rooted.exists():
+            return rooted
+    return None
 
 
 def _parse_ids(value: str | None) -> list[str] | None:
@@ -1196,6 +1237,158 @@ def eval_generate(
     u = m["unanswerable"]
     if u["n"]:
         console.print(f"unanswerable: refused {u['refused']['count']}/{u['refused']['n']}")
+    console.print(f"[green]saved[/] {path}")
+
+
+@eval_app.command("judge")
+def eval_judge(
+    generation_run_path: str = typer.Option(..., "--generation-run", help="Generation run JSON"),
+    provider_name: str | None = typer.Option(None, "--provider", help="openai | local | echo"),
+    tag: str | None = typer.Option(None, "--tag"),
+    limit: int | None = typer.Option(None, "--limit", min=1),
+    queries: str | None = typer.Option(None, "--queries"),
+    concurrency: int = typer.Option(4, "--concurrency", min=1, max=16),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    no_cache: bool = typer.Option(False, "--no-cache"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    price_in: float | None = typer.Option(None, "--price-in", help="USD per 1M input tokens"),
+    price_out: float | None = typer.Option(None, "--price-out", help="USD per 1M output tokens"),
+    cache_dir: str = typer.Option("data/eval/cache", "--cache-dir"),
+    out_dir: str = typer.Option("data/eval/generation", "--out"),
+) -> None:
+    """Judge a generation run. Re-runnable without regenerating anything.
+
+    The judge sees only the question, the sources the generator saw, the answer
+    and the reference facts, and returns observations; every score is computed
+    from those in Python. The judge model is evaluation.llm_judge_model.
+    """
+    from mmrag.config import ExperimentConfig, get_settings
+    from mmrag.evaluation.generation_eval import (
+        DryRunProvider,
+        GenerationRun,
+        environment,
+        file_fingerprint,
+        now_iso,
+    )
+    from mmrag.evaluation.judge import JUDGE_PROMPT_VERSION
+    from mmrag.evaluation.judged_eval import JudgedRun, aggregate_judged, run_judging
+    from mmrag.evaluation.llm_cache import CachingProvider
+    from mmrag.evaluation.report import load_run
+    from mmrag.generation.providers import ProviderError, get_provider
+    from mmrag.textify.tokens import get_token_counter
+
+    started = time.perf_counter()
+    if not Path(generation_run_path).exists():
+        raise typer.BadParameter(f"no generation run at {generation_run_path}")
+    generation = GenerationRun.load(generation_run_path)
+
+    # The retrieval run supplies the experiment config, and with it the judge
+    # model, seed and output cap.
+    recorded = generation.retrieval_run.get("path")
+    retrieval_path = _resolve_recorded_path(recorded)
+    if retrieval_path is None:
+        console.print(f"[red]the retrieval run this generation came from is missing:[/] {recorded}")
+        raise typer.Exit(code=1)
+    expected_sha = generation.retrieval_run.get("sha256")
+    if expected_sha and file_fingerprint(retrieval_path)["sha256"] != expected_sha:
+        console.print(f"[yellow]warning: {retrieval_path} has changed since this generation run "
+                      "was produced; its config is used as found.[/]")
+    retrieval_run = load_run(retrieval_path)
+    config = ExperimentConfig.model_validate(retrieval_run.config)
+    model = config.evaluation.llm_judge_model
+    max_out = config.evaluation.judge_max_output_tokens
+
+    # Every record is kept: one whose generation failed is not judged, but it
+    # stays in the run as an `error` so coverage and the taxonomy account for it.
+    records = list(generation.records)
+    wanted = _parse_ids(queries)
+    if wanted:
+        unknown = sorted(set(wanted) - {r.query_id for r in generation.records})
+        if unknown:
+            console.print(f"[red]unknown query id(s): {unknown}[/]")
+            raise typer.Exit(code=1)
+        records = [r for r in records if r.query_id in set(wanted)]
+    if limit is not None:
+        records = records[:limit]
+
+    settings = get_settings()
+    name = provider_name or settings.generation_provider
+    if dry_run:
+        inner: Any = DryRunProvider(name)
+    else:
+        try:
+            inner = get_provider(name=name, timeout=config.generation.request_timeout_s,
+                                 max_retries=config.generation.max_retries)
+        except ProviderError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(code=1) from exc
+
+    provider = CachingProvider(inner, cache_dir, kind="judge", prompt_version=JUDGE_PROMPT_VERSION,
+                               seed=config.evaluation.llm_seed, enabled=not no_cache,
+                               refresh=refresh)
+    self_judge = model == generation.generation.get("model")
+    unjudgeable = sum(1 for r in records if r.status != "ok" or r.answer is None)
+    console.print(
+        f"Judging [cyan]{generation.label}[/] — {len(records) - unjudgeable} answers with {model}"
+        + (f", {unjudgeable} without an answer recorded as errors" if unjudgeable else "")
+        + (" [yellow](dry run)[/]" if dry_run else "")
+    )
+    if self_judge:
+        console.print("[dim]  judge model = generation model: a self-judge. Absolute scores are "
+                      "directional; compare methods rather than reading them as ground truth.[/]")
+
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(),
+                  TextColumn("{task.completed}/{task.total}"), TimeElapsedColumn(),
+                  console=console) as progress:
+        task = progress.add_task("judging", total=len(records))
+        judged = run_judging(records, provider, model=model, max_output_tokens=max_out,
+                             dry_run=dry_run, concurrency=concurrency, attempts=2,
+                             on_record=lambda r: progress.advance(task))
+
+    if dry_run:
+        from mmrag.evaluation.judge import build_judge_messages
+
+        counter = get_token_counter()
+        # Records without an answer were skipped, not looked up, and cost nothing.
+        todo = [j for j in judged if j.judge.status == "dry_run" and not j.judge.cache_hit]
+        cached = sum(1 for j in judged if j.judge.status == "dry_run" and j.judge.cache_hit)
+        tokens_in = sum(
+            sum(counter.count(m.content) for m in build_judge_messages(
+                j.generation.query, j.generation.sources_block, j.generation.answer or "",
+                j.generation.required_facts))
+            for j in todo
+        )
+        tokens_out = 700 * len(todo)
+        cost = (None if price_in is None or price_out is None
+                else tokens_in / 1e6 * price_in + tokens_out / 1e6 * price_out)
+        console.print(
+            f"Dry run: {len(todo)} judge calls needed ({cached} cached), "
+            f"~{tokens_in:,} input and ~{tokens_out:,} output tokens"
+            + (f", ~${cost:.4f}" if cost is not None else "") + ". No provider was called."
+        )
+        return
+
+    result = JudgedRun(
+        method=generation.method, label=tag or generation.label, created_at=now_iso(),
+        elapsed_s=round(time.perf_counter() - started, 1),
+        generation_run={**file_fingerprint(generation_run_path), "label": generation.label},
+        generation=generation.generation,
+        judge={"provider": name, "model": model, "temperature": 0.0,
+               "max_output_tokens": max_out, "seed": config.evaluation.llm_seed,
+               "prompt_version": JUDGE_PROMPT_VERSION, "self_judge": self_judge},
+        environment=environment(), cache=provider.stats.as_dict(),
+        totals={"calls_made": provider.stats.misses, "cache_hits": provider.stats.hits,
+                "prompt_tokens": sum(j.judge.usage.get("prompt_tokens", 0) for j in judged),
+                "completion_tokens": sum(
+                    j.judge.usage.get("completion_tokens", 0) for j in judged)},
+        records=judged, metrics=aggregate_judged(judged),
+    )
+    stamp = result.created_at.replace(":", "").replace("-", "")
+    path = result.save(Path(out_dir) / f"{stamp}_{result.label.replace('/', '_')}_judged.json")
+
+    from mmrag.evaluation.generation_report import render_judged
+
+    render_judged([result], console=console)
     console.print(f"[green]saved[/] {path}")
 
 
