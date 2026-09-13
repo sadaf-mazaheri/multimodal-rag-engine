@@ -12,6 +12,7 @@ citation markers, so citation parsing is genuinely tested rather than bypassed.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from mmrag.generation.providers.base import Completion, Message, Usage
 
@@ -35,6 +36,8 @@ class EchoProvider:
         model: str = "echo",
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
+        seed: int | None = None,  # noqa: ARG002 - accepted for interface parity
+        response_format: dict[str, Any] | None = None,  # noqa: ARG002
     ) -> Completion:
         user = next((m for m in reversed(messages) if m.role == "user"), None)
         content = user.content if user else ""

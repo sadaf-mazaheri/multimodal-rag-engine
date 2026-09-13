@@ -19,6 +19,7 @@ from mmrag.generation.providers.base import (
     Message,
     ProviderError,
     Usage,
+    redact_secrets,
 )
 from mmrag.logging_utils import get_logger
 
@@ -77,21 +78,33 @@ class OpenAIProvider:
         model: str,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
+        seed: int | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> Completion:
         payload = [self._to_openai(m) for m in messages]
+        request: dict[str, Any] = {
+            "model": model,
+            # The SDK's message types are a large union of TypedDicts; the dicts
+            # built above are structurally correct but not statically
+            # recognisable as any single member of it.
+            "messages": payload,
+            "temperature": temperature,
+            "max_tokens": max_output_tokens,
+        }
+        # Only sent when asked for, so existing callers produce byte-identical
+        # requests to before.
+        if seed is not None:
+            request["seed"] = seed
+        if response_format is not None:
+            request["response_format"] = response_format
+
         started = time.perf_counter()
         try:
-            response = self.client.chat.completions.create(
-                model=model,
-                # The SDK's message types are a large union of TypedDicts; the
-                # dicts built above are structurally correct but not statically
-                # recognisable as any single member of it.
-                messages=payload,  # type: ignore[arg-type]
-                temperature=temperature,
-                max_tokens=max_output_tokens,
-            )
+            response = self.client.chat.completions.create(**request)
         except Exception as exc:
-            raise ProviderError(f"{type(exc).__name__}: {exc}") from exc
+            # SDK errors can echo a partially masked key; never let one reach a
+            # log line or a run artefact.
+            raise ProviderError(redact_secrets(f"{type(exc).__name__}: {exc}")) from None
         elapsed = (time.perf_counter() - started) * 1000
 
         choice = response.choices[0]
@@ -104,7 +117,12 @@ class OpenAIProvider:
                 completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
             ),
             latency_ms=elapsed,
-            metadata={"finish_reason": choice.finish_reason},
+            metadata={
+                "finish_reason": choice.finish_reason,
+                # Seeded sampling is best-effort; the fingerprint is what explains
+                # a replay that differs.
+                "system_fingerprint": getattr(response, "system_fingerprint", None),
+            },
         )
 
     @staticmethod

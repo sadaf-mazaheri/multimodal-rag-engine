@@ -12,9 +12,19 @@ images. Anything richer would leak provider-specific concepts into the methods.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+
+# OpenAI-style secret keys. Provider SDK errors sometimes echo a (partially
+# masked) key back, and those messages end up in logs and run artefacts.
+_SECRET_RE = re.compile(r"\b(?:sk|rk)-[A-Za-z0-9_\-*]{6,}")
+
+
+def redact_secrets(text: str) -> str:
+    """Remove anything shaped like an API key from a message."""
+    return _SECRET_RE.sub("[REDACTED]", text)
 
 
 @dataclass
@@ -69,7 +79,14 @@ class ProviderError(RuntimeError):
 
 @runtime_checkable
 class LLMProvider(Protocol):
-    """Minimal contract every generation backend implements."""
+    """Minimal contract every generation backend implements.
+
+    ``seed`` and ``response_format`` are optional and default to ``None``, so a
+    caller that passes neither -- every method pipeline -- sends exactly the
+    request it always did. Evaluation uses them: a seed for best-effort
+    repeatability, and a JSON schema so the judge's verdicts parse reliably.
+    A backend that cannot honour them should accept and ignore them.
+    """
 
     name: str
 
@@ -80,6 +97,8 @@ class LLMProvider(Protocol):
         model: str,
         temperature: float = 0.0,
         max_output_tokens: int = 1024,
+        seed: int | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> Completion: ...
 
     def supports_images(self) -> bool: ...

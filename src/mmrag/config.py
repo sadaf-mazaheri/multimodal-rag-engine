@@ -281,13 +281,30 @@ class EvaluationConfig(BaseModel):
     retrieval_metrics: list[str] = Field(
         default_factory=lambda: ["recall", "precision", "mrr", "ndcg", "hit_rate"]
     )
-    # Answer metrics. The LLM judge is separated so it can be turned off to run
-    # the whole benchmark for free.
+    # Answer metrics. Deterministic ones are free; the rest come from the judge.
+    # Deliberately no exact match or token F1: both penalise a correct paraphrase
+    # and reward a fluent wrong answer, which is the opposite of what is being
+    # measured for free-form cited answers.
     answer_metrics: list[str] = Field(
-        default_factory=lambda: ["exact_match", "token_f1", "citation_accuracy"]
+        default_factory=lambda: [
+            "evidence_in_context",
+            "correctness",
+            "completeness",
+            "faithfulness",
+            "citation_support",
+            "refusal_correctness",
+            "grounded_correct",
+        ]
     )
     llm_judge_enabled: bool = False
+    # The same model as generation, chosen for budget. That makes this a
+    # self-judge: absolute scores are directional, and the between-method delta
+    # is the more trustworthy number since both arms share the generator.
     llm_judge_model: str = "gpt-4o-mini"
+    judge_max_output_tokens: int = Field(default=2000, ge=64)
+    # Best-effort repeatability for generation and judging alike. OpenAI treats
+    # it as a hint; the recorded system fingerprint explains any drift.
+    llm_seed: int = 42
     # Bootstrap resamples for confidence intervals on the headline numbers.
     bootstrap_samples: int = Field(default=1000, ge=0)
     random_seed: int = 42
