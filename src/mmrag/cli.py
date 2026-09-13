@@ -7,6 +7,7 @@ reproducible from a shell history rather than from a notebook someone ran once.
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1001,6 +1002,201 @@ def eval_compare(
     if markdown:
         console.print("\n[dim]-- Markdown --[/]")
         print(to_markdown(loaded))
+
+
+def _method_from_run(run: Any):
+    """Rebuild the exact method a retrieval run used, including its overrides."""
+    from mmrag.config import ExperimentConfig
+    from mmrag.methods import Method1Textified, Method2ModalityAware
+
+    config = ExperimentConfig.model_validate(run.config)
+    if run.overrides.get("rerank_enabled") is False:
+        config.retrieval.rerank_enabled = False
+    builders = {"method1": Method1Textified, "method2": Method2ModalityAware}
+    if config.method not in builders:
+        raise typer.BadParameter(f"{config.method} is not supported for generation")
+    return config, builders[config.method](config)
+
+
+def _parse_ids(value: str | None) -> list[str] | None:
+    return [v.strip() for v in value.split(",") if v.strip()] if value else None
+
+
+@eval_app.command("generate")
+def eval_generate(
+    retrieval_run_path: str = typer.Option(..., "--retrieval-run", help="Retrieval run JSON"),
+    gold_path: str = typer.Option(DEFAULT_GOLD, "--gold"),
+    generation_gold_path: str = typer.Option(DEFAULT_GENERATION_GOLD, "--generation-gold"),
+    provider_name: str | None = typer.Option(None, "--provider", help="openai | local | echo"),
+    tag: str | None = typer.Option(None, "--tag"),
+    limit: int | None = typer.Option(None, "--limit", min=1),
+    queries: str | None = typer.Option(None, "--queries", help="Comma-separated ids, e.g. q001,u003"),
+    concurrency: int = typer.Option(4, "--concurrency", min=1, max=16),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Build prompts and estimate; call nothing"),
+    no_cache: bool = typer.Option(False, "--no-cache"),
+    refresh: bool = typer.Option(False, "--refresh", help="Ignore cached answers and overwrite them"),
+    no_unanswerable: bool = typer.Option(False, "--no-unanswerable"),
+    price_in: float | None = typer.Option(None, "--price-in", help="USD per 1M input tokens"),
+    price_out: float | None = typer.Option(None, "--price-out", help="USD per 1M output tokens"),
+    cache_dir: str = typer.Option("data/eval/cache", "--cache-dir"),
+    out_dir: str = typer.Option("data/eval/generation", "--out"),
+) -> None:
+    """Generate answers from a saved retrieval run.
+
+    Uses the exact chunks the retrieval run scored, so no retrieval is re-run for
+    the gold queries. Unanswerable queries are retrieved live with the run's own
+    configuration. Nothing is called with --dry-run.
+    """
+    from mmrag.config import get_settings
+    from mmrag.evaluation.generation_eval import (
+        PROMPT_VERSION,
+        DryRunProvider,
+        GenerationRun,
+        RetrievalRunMismatch,
+        aggregate,
+        environment,
+        estimate,
+        file_fingerprint,
+        now_iso,
+        run_generation,
+        select_work,
+        totals,
+    )
+    from mmrag.evaluation.generation_gold import (
+        GenerationGold,
+        validate_against_retrieval_gold,
+    )
+    from mmrag.evaluation.llm_cache import CachingProvider
+    from mmrag.evaluation.report import load_run
+    from mmrag.generation.answerer import Answerer
+    from mmrag.generation.providers import ProviderError, get_provider
+
+    started = time.perf_counter()
+    run = load_run(retrieval_run_path)
+    gold = _load_gold(gold_path)
+    generation_gold = GenerationGold.load(generation_gold_path)
+    problems = validate_against_retrieval_gold(generation_gold, gold)
+    if problems:
+        for p in problems:
+            console.print(f"[red]{p.query_id}: {p.kind}[/] -- {p.detail}")
+        raise typer.Exit(code=1)
+
+    config, method = _method_from_run(run)
+    top_k = max(config.evaluation.k_values)
+    use_metadata = run.overrides.get("use_metadata")
+
+    def live_retrieve(query: str):
+        kwargs: dict[str, Any] = {"top_k": top_k}
+        if use_metadata is False:
+            kwargs["use_metadata"] = False
+        return method.retrieve(query, **kwargs).results
+
+    try:
+        items = select_work(
+            run, gold, generation_gold, method.chunks,
+            include_unanswerable=not no_unanswerable,
+            query_ids=_parse_ids(queries), limit=limit, live_retrieve=live_retrieve,
+        )
+    except (RetrievalRunMismatch, ValueError) as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    settings = get_settings()
+    name = provider_name or settings.generation_provider
+    if dry_run:
+        inner: Any = DryRunProvider(name)
+    else:
+        try:
+            inner = get_provider(
+                name=name,
+                timeout=config.generation.request_timeout_s,
+                max_retries=config.generation.max_retries,
+            )
+        except ProviderError as exc:
+            console.print(f"[red]{exc}[/]")
+            raise typer.Exit(code=1) from exc
+
+    provider = CachingProvider(
+        inner, cache_dir, kind="generation", prompt_version=PROMPT_VERSION,
+        seed=config.evaluation.llm_seed, enabled=not no_cache, refresh=refresh,
+    )
+    answerer = Answerer(config.generation, provider)
+
+    label = tag or run.label()
+    console.print(
+        f"Generating for [cyan]{run.label()}[/] — {len(items)} queries "
+        f"({sum(i.answerable for i in items)} answerable, "
+        f"{sum(not i.answerable for i in items)} unanswerable), "
+        f"model {config.generation.text_model}, provider {name}"
+        + (" [yellow](dry run)[/]" if dry_run else "")
+    )
+
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(),
+                  TextColumn("{task.completed}/{task.total}"), TimeElapsedColumn(),
+                  console=console) as progress:
+        task = progress.add_task("generating", total=len(items))
+        records = run_generation(
+            items, answerer, provider, dry_run=dry_run, concurrency=concurrency,
+            attempts=2, on_record=lambda r: progress.advance(task),
+        )
+
+    if dry_run:
+        projection = estimate(records, price_in_per_m=price_in, price_out_per_m=price_out)
+        table = Table(title="Dry run — projected cost of generating and then judging")
+        for col in ("stage", "calls", "input tokens", "output tokens", "cost (USD)"):
+            table.add_column(col, justify="right" if col != "stage" else "left")
+        for stage in ("generation", "judge", "total"):
+            p = projection[stage]
+            table.add_row(stage, str(p["calls"]), f"{p['input_tokens']:,}",
+                          f"{p['output_tokens']:,}",
+                          "-" if p["cost_usd"] is None else f"{p['cost_usd']:.4f}")
+        console.print(table)
+        console.print(
+            f"[dim]generation cache hits: {projection['generation']['cache_hits']}. "
+            "Tokens are estimated with the context-budget tokenizer, not OpenAI's. "
+            "No provider was called.[/]"
+        )
+        if price_in is None or price_out is None:
+            console.print("[dim]Pass --price-in and --price-out (USD per 1M tokens) for a cost.[/]")
+        return
+
+    result = GenerationRun(
+        method=run.method, label=label, created_at=now_iso(),
+        elapsed_s=round(time.perf_counter() - started, 1),
+        retrieval_run={**file_fingerprint(retrieval_run_path), "label": run.label(),
+                       "started_at": run.started_at, "overrides": run.overrides},
+        gold={**file_fingerprint(gold_path), "version": gold.version},
+        generation_gold={**file_fingerprint(generation_gold_path),
+                         "version": generation_gold.version},
+        generation={"provider": name, "model": config.generation.text_model,
+                    "temperature": config.generation.temperature,
+                    "max_output_tokens": config.generation.max_output_tokens,
+                    "max_context_tokens": config.generation.max_context_tokens,
+                    "refuse_without_evidence": config.generation.refuse_without_evidence,
+                    "seed": config.evaluation.llm_seed, "prompt_version": PROMPT_VERSION,
+                    "top_k": top_k},
+        environment=environment(), cache=provider.stats.as_dict(),
+        totals=totals(records, provider), records=records, metrics=aggregate(records),
+    )
+    stamp = result.created_at.replace(":", "").replace("-", "")
+    path = result.save(Path(out_dir) / f"{stamp}_{label.replace('/', '_')}_generation.json")
+
+    m = result.metrics
+    console.print(
+        f"\n[green]{m['n_ok']}[/] ok, [red]{m['n_errors']}[/] errors. "
+        f"Calls made {result.totals['calls_made']}, cache hits {result.totals['cache_hits']}, "
+        f"tokens {result.totals['prompt_tokens']:,} in / {result.totals['completion_tokens']:,} out."
+    )
+    a = m["answerable"]
+    console.print(
+        f"answerable: evidence in context {a['evidence_in_context']['count']}/"
+        f"{a['evidence_in_context']['n']}, refused {a['refused']['count']}/{a['refused']['n']}, "
+        f"cited {a['citation_presence']['count']}/{a['citation_presence']['n']}"
+    )
+    u = m["unanswerable"]
+    if u["n"]:
+        console.print(f"unanswerable: refused {u['refused']['count']}/{u['refused']['n']}")
+    console.print(f"[green]saved[/] {path}")
 
 
 if __name__ == "__main__":  # pragma: no cover
