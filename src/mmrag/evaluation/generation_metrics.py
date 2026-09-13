@@ -59,7 +59,7 @@ def contains_gold_evidence(chunks: Iterable[Chunk], gold: GoldQuery | None) -> b
 _KEY_TOKEN = re.compile(r"(?:[A-Za-z][A-Za-z.\-]*)?\d[\w.,+%/-]*")
 
 
-def _normalise(text: str) -> str:
+def normalise(text: str) -> str:
     return " ".join(text.lower().replace(" ", " ").split())
 
 
@@ -79,7 +79,7 @@ def fact_lexical_coverage(facts: Sequence[str], answer: str | None) -> dict[str,
     excluded rather than counted as misses. The result is a lower bound on
     coverage and exists to measure agreement with the judge's own verdicts.
     """
-    haystack = _normalise(answer or "")
+    haystack = normalise(answer or "")
     checkable = found = 0
     for fact in facts:
         tokens = key_tokens(fact)
