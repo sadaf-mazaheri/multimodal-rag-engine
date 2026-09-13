@@ -39,6 +39,10 @@ data/indexes/**
 # except for bulky per-run artifacts.
 data/eval/runs/**
 !data/eval/runs/.gitkeep
+# Generation-evaluation artefacts and the LLM response cache: both derived, both
+# potentially large, and the cache is reproducible from its requests.
+data/eval/generation/**
+data/eval/cache/**
 
 # --- Model caches ---
 .cache/
