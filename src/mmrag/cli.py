@@ -43,6 +43,7 @@ app.add_typer(index_app, name="index")
 app.add_typer(eval_app, name="eval")
 
 DEFAULT_GOLD = "data/eval/gold/v1.yaml"
+DEFAULT_GENERATION_GOLD = "data/eval/gold/generation_v1.yaml"
 
 console = Console()
 
@@ -807,6 +808,34 @@ def doctor() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _validate_generation_gold(path: str, retrieval_gold) -> None:
+    """Schema-check the generation sidecar and cross-check it against v1."""
+    from mmrag.evaluation.generation_gold import (
+        GenerationGold,
+        describe,
+        validate_against_retrieval_gold,
+    )
+
+    try:
+        generation = GenerationGold.load(path)
+    except Exception as exc:
+        console.print(f"[red]{path} is not a valid generation gold file:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    info = describe(generation)
+    console.print(
+        f"[cyan]{path}[/] v{info['version']}: {info['n_answerable']} answerable "
+        f"({info['n_required_facts']} required facts), {info['n_unanswerable']} unanswerable"
+    )
+    problems = validate_against_retrieval_gold(generation, retrieval_gold)
+    for problem in problems:
+        console.print(f"[red]  {problem.query_id}: {problem.kind}[/] -- {problem.detail}")
+    if problems:
+        raise typer.Exit(code=1)
+    if info["needs_review"]:
+        console.print(f"[yellow]  NEEDS REVIEW:[/] {info['needs_review']}")
+
+
 def _load_gold(path: str):
     from mmrag.evaluation import GoldSet
 
@@ -823,6 +852,10 @@ def _load_gold(path: str):
 def eval_validate(
     gold_path: str = typer.Option(DEFAULT_GOLD, "--gold"),
     config_name: str = typer.Option("method1", "--config", "-c"),
+    generation_gold_path: str = typer.Option(
+        DEFAULT_GENERATION_GOLD, "--generation-gold",
+        help="Also validate the generation sidecar, if the file exists",
+    ),
 ) -> None:
     """Check every gold evidence entry resolves against a built index.
 
@@ -833,6 +866,8 @@ def eval_validate(
     from mmrag.evaluation import validate_against_chunks
 
     gold = _load_gold(gold_path)
+    if Path(generation_gold_path).exists():
+        _validate_generation_gold(generation_gold_path, gold)
     _, method = _load_method(config_name)
     chunks = list(method.chunks.values())
 
