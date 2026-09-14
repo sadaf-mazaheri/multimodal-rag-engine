@@ -231,6 +231,33 @@ class TestReportRendering:
         text = to_markdown(self.runs(config))
         assert text.count("\n") == 3  # header, separator, two runs
 
+    def test_routing_summary_counts_fan_out_across_routed_modalities_only(self, config):
+        from mmrag.evaluation.report import routing_summary
+
+        routes = {
+            # Method 3 appends visual_page to every decision: three modalities
+            # in the list, but the router itself chose only text + table.
+            "q1": {"fell_back": False, "modalities": ["text", "table", "visual_page"]},
+            # A genuine fan-out, with the always-on page signal appended.
+            "q2": {"fell_back": True,
+                   "modalities": ["text", "table", "image", "visual_page"]},
+        }
+        run = run_evaluation(StubMethod([make_chunk("d1", 3, ChunkType.FIGURE, "c1")]),
+                             GOLD, config, config_name="method3")
+        for query in run.per_query:
+            query.routing = routes[query.query_id]
+
+        table = routing_summary(run)
+        cells = {c.header: c._cells for c in table.columns}
+        assert "fired text+table+image" in cells
+        assert dict(zip(cells["stratum"], cells["fired text+table+image"], strict=True)) == {
+            "figure": "0/1", "natural": "1/1"}
+
+    def test_routing_summary_is_omitted_without_routing(self, config):
+        from mmrag.evaluation.report import routing_summary
+
+        assert routing_summary(self.runs(config)[0]) is None
+
     def test_rendering_an_empty_run_list_does_not_raise(self):
         from rich.console import Console
 

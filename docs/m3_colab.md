@@ -36,8 +36,11 @@ uploading into the Colab session.
 
 ## 2. On Colab
 
-Runtime → Change runtime type → **GPU**. L4 or A100 run bfloat16; a T4 runs
-float16. Or open `notebooks/m3_colab_gpu.ipynb`, which contains these cells.
+Runtime → Change runtime type → **GPU**. The model loads in bfloat16 whenever
+torch reports bfloat16 support, and in float16 otherwise. That can include a
+T4: the index behind the published results was built on a T4 in bfloat16 and
+passed verification. Or open `notebooks/m3_colab_gpu.ipynb`, which contains
+these cells.
 
 **Setup**
 

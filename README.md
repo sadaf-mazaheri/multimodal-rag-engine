@@ -719,10 +719,19 @@ exposes the page ranking on its own, so that change is local to the retriever.
 
 - **Model:** `vidore/colqwen2-v1.0` (Qwen2-VL-2B base plus adapter), roughly
   4.5 GB to download.
-- **GPU:** 16 GB of VRAM is comfortable. `dtype: auto` uses bfloat16 where
-  supported (L4, A10, A100 and newer) and float16 otherwise (T4). If float16
-  produces NaNs, the build stops and says so; set `visual.dtype: float32`.
-  Out-of-memory errors halve the batch size and retry.
+- **GPU:** 16 GB of VRAM is comfortable. `dtype: auto` uses bfloat16 when
+  `torch.cuda.is_bf16_supported()` says so and float16 otherwise. If half
+  precision produces NaNs, the build stops and says so; set
+  `visual.dtype: float32`. Out-of-memory errors halve the batch size and retry.
+- **The index the results use** was built on a Colab **Tesla T4** (torch
+  2.11.0+cu128) in **bfloat16**. The T4 has no native bfloat16 support, but
+  this torch build reported it as supported, so `dtype: auto` chose it. The
+  build passed every check and was not rebuilt. The encoder rejects non-finite
+  embeddings, and the runner verified all 951 pages and 50 cached queries. The
+  main repository's loader checks file checksums, model identity, the corpus
+  lock and chunk coverage, and `mmrag eval run` enforces it. The dtype is recorded
+  in `data/indexes/visual_pages/index/index.json`; vectors are stored as float16
+  regardless.
 - **Index size:** every page keeps several hundred float16 vectors, on the order
   of 200 MB for the corpus.
 - **CPU fallback:** query encoding on CPU works but needs ~9 GB of RAM; the query

@@ -158,6 +158,12 @@ def disagreements(runs: list[RetrievalRun], metric: str = "recall@10", limit: in
     return table
 
 
+# The modalities the router chooses between. Method 3's visual_page signal is
+# appended to every decision, so it says nothing about whether the router fanned
+# out and is not counted here.
+ROUTED_MODALITIES = frozenset({"text", "table", "image"})
+
+
 def routing_summary(run: RetrievalRun) -> Table | None:
     """How often the router fanned out, for runs that have a router."""
     routed = [q for q in run.per_query if q.routing]
@@ -168,15 +174,17 @@ def routing_summary(run: RetrievalRun) -> Table | None:
     table.add_column("stratum", style="cyan")
     table.add_column("n", justify="right")
     table.add_column("fell back", justify="right")
-    table.add_column("fired all 3", justify="right")
+    table.add_column("fired text+table+image", justify="right")
 
     for stratum in STRATA:
         group = [q for q in routed if q.stratum == stratum]
         if not group:
             continue
         fell = sum(1 for q in group if q.routing.get("fell_back"))
-        allthree = sum(1 for q in group if len(q.routing.get("modalities", [])) >= 3)
-        table.add_row(stratum, str(len(group)), f"{fell}/{len(group)}", f"{allthree}/{len(group)}")
+        fanned = sum(
+            1 for q in group if ROUTED_MODALITIES.issubset(q.routing.get("modalities", []))
+        )
+        table.add_row(stratum, str(len(group)), f"{fell}/{len(group)}", f"{fanned}/{len(group)}")
     return table
 
 
