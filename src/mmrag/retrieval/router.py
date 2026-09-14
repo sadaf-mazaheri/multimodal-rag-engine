@@ -1,9 +1,10 @@
 """Query router: deciding which modality retrievers to fire.
 
-**Ownership: unique to Method 2.** Method 1 has no router -- it flattens
+Part of the engine (:mod:`mmrag.engine`). Method 1 has no router -- it flattens
 everything into one index, so there is nothing to route between.
 
-The router is what makes Method 2 more than "Method 1 with extra indexes". It
+The router is what makes the modality-aware engine more than "Method 1 with
+extra indexes". It
 reads the query for evidence about *what kind of thing* would answer it, and
 fires only the retrievers that could plausibly hold it.
 
@@ -154,13 +155,30 @@ class HeuristicRouter:
     that caused it. An LLM router is a later ablation, not the baseline.
     """
 
-    def __init__(self, config: RouterConfig, *, available: list[Modality] | None = None):
+    def __init__(
+        self,
+        config: RouterConfig,
+        *,
+        available: list[Modality] | None = None,
+        always: list[Modality] | None = None,
+    ):
         self.config = config
-        # Visual page retrieval belongs to Method 3; Method 2 offers text,
-        # tables and images.
+        # The modalities the lexical signals choose between.
         self.available = available or [Modality.TEXT, Modality.TABLE, Modality.IMAGE]
+        # Modalities that fire on every query, after the decision is made. The
+        # visual page signal is one: it sees every modality on a page at once,
+        # so like text it is never switched off, and a query the lexical signals
+        # cannot place is exactly where a whole-page view is most likely to help.
+        self.always = [m for m in (always or []) if m not in self.available]
 
     def route(self, query: str, *, base_filters: MetadataFilter | None = None) -> RoutingDecision:
+        decision = self._route(query, base_filters=base_filters)
+        for modality in self.always:
+            if modality not in decision.modalities:
+                decision.modalities.append(modality)
+        return decision
+
+    def _route(self, query: str, *, base_filters: MetadataFilter | None) -> RoutingDecision:
         scores, signals = self._score(query)
         filters = self._extract_filters(query)
         if base_filters is not None:

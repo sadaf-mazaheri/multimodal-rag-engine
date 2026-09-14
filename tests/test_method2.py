@@ -42,9 +42,9 @@ def method(tmp_path_factory):
 
     config = load_experiment_config("method2")
     variant = f"test2-{uuid.uuid4().hex[:8]}"
-    instance = Method2ModalityAware(config, index_base=tmp_path_factory.mktemp("indexes"))
-    instance.variant = variant
-    instance.index_dir = instance.index_dir.parent / variant
+    instance = Method2ModalityAware(
+        config, index_base=tmp_path_factory.mktemp("indexes"), variant=variant
+    )
 
     try:
         QdrantStore(variant).exists()

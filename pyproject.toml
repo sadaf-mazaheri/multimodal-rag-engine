@@ -50,9 +50,11 @@ openai = ["openai>=1.40"]
 # alternative backend and additionally needs the Tesseract binary on PATH.
 ocr = ["rapidocr-onnxruntime>=1.4,<2", "pytesseract>=0.3.10"]
 
-# Method 3 visual retrieval. Practically requires a GPU; on a CPU-only box the
-# index is built out-of-band via notebooks/colab_visual_indexing.ipynb.
-visual = ["colpali-engine>=0.3", "transformers>=4.45", "accelerate>=0.33"]
+# Method 3 page encoding with ColQwen2 (colpali-engine added ColQwen2 in 0.3.1).
+# Building the page index practically requires a GPU; install this there. A
+# CPU-only machine can still run Method 3 retrieval from a copied page index and
+# precomputed query embeddings, without this extra.
+visual = ["colpali-engine>=0.3.1,<0.4", "transformers>=4.45", "accelerate>=0.33"]
 
 # Fully offline generation via a local server (Ollama / llama.cpp / vLLM).
 local = ["openai>=1.40"]

@@ -1,0 +1,18 @@
+# Dependencies of scripts/run_m3_gpu.py only -- not the project.
+#
+# torch and torchvision are deliberately absent: Colab ships CUDA builds, and
+# colpali-engine 0.3.18 accepts torch >=2.2,<2.14, so pip keeps them. Installing
+# torch from PyPI here could replace the CUDA build with a CPU one.
+#
+# colpali-engine is pinned to the version whose API the encoder was checked
+# against; it pulls a compatible transformers (>=5.3,<6) and peft (the
+# vidore/colqwen2-v1.0 checkpoint is an adapter over vidore/colqwen2-base).
+colpali-engine==0.3.18
+
+# mmrag.config, mmrag.logging_utils and the bundle inputs.
+pydantic>=2.7
+pydantic-settings>=2.3
+PyYAML>=6.0
+rich>=13.7
+numpy>=1.26
+pillow>=10.3

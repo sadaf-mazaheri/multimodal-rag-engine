@@ -1,9 +1,13 @@
 """Shared retriever contract.
 
-**Ownership: shared infrastructure.** Method 1's ``HybridRetriever`` predates
-this protocol and calls BM25 and Qdrant inline; it is deliberately left alone so
-that Method 1's behaviour is frozen while Method 2 is built. New retrievers
-implement this protocol, and Method 2 composes them.
+**Ownership: shared infrastructure.** Every retriever the engine composes
+implements :class:`Retriever`: text BM25 and dense, tables, figures and visual
+pages alike. Adding a retrieval signal means implementing this protocol and
+registering the retriever with :class:`mmrag.engine.RAGEngine`; routing, fusion,
+reranking and generation need no change.
+
+Method 1's ``HybridRetriever`` predates this protocol and calls BM25 and Qdrant
+inline; it is deliberately left alone so that Method 1's behaviour stays frozen.
 
 The small duplication between ``HybridRetriever``'s inline calls and
 ``BM25Retriever``/``DenseRetriever`` here is the deliberate price of that freeze:

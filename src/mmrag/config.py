@@ -242,6 +242,45 @@ class RetrievalConfig(BaseModel):
         return self
 
 
+class VisualRetrievalConfig(BaseModel):
+    """Method 3 late-interaction page retrieval. Ignored by Methods 1 and 2.
+
+    The model itself is ``embedding.visual_model``; this section says how to run
+    it. Device and dtype are explicit rather than assumed, because the index is
+    built on a GPU machine and evaluated on a CPU one, and a silent fallback
+    from one to the other would change both speed and the stored numbers.
+    """
+
+    # auto | cpu | mps | cuda | cuda:N. "auto" prefers cuda, then mps, then cpu.
+    device: str = "auto"
+    # auto: bfloat16 on a GPU that supports it, float16 on one that does not,
+    # float32 on cpu and mps.
+    dtype: Literal["auto", "float32", "float16", "bfloat16"] = "auto"
+    # Pin a Hugging Face revision for reproducibility; None records whatever
+    # commit was resolved at load time.
+    model_revision: str | None = None
+    attn_implementation: str | None = None
+    batch_size: int = Field(default=4, ge=1, le=64)
+    query_batch_size: int = Field(default=16, ge=1, le=256)
+    # Page embeddings are stored at this precision. float16 halves the index
+    # with no measurable effect on MaxSim ordering.
+    storage_dtype: Literal["float16", "float32"] = "float16"
+    # A full-corpus page index on CPU takes hours; refuse unless asked.
+    allow_cpu_indexing: bool = False
+    # Reuse query embeddings precomputed with `mmrag index embed-queries`.
+    use_query_cache: bool = True
+
+    @model_validator(mode="after")
+    def _device_is_recognised(self) -> VisualRetrievalConfig:
+        import re
+
+        if not re.fullmatch(r"auto|cpu|mps|cuda(:\d+)?", self.device):
+            raise ValueError(
+                f"visual.device must be auto, cpu, mps, cuda or cuda:N, got {self.device!r}"
+            )
+        return self
+
+
 class RouterConfig(BaseModel):
     """Method 2 query router."""
 
@@ -323,6 +362,7 @@ class ExperimentConfig(BaseModel):
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     router: RouterConfig = Field(default_factory=RouterConfig)
+    visual: VisualRetrievalConfig = Field(default_factory=VisualRetrievalConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
 

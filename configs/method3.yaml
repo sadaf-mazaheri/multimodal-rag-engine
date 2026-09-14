@@ -1,34 +1,35 @@
-extends: default
+extends: method2
 
 name: method3_hybrid_visual
 description: >
-  Hybrid visual multimodal RAG. Adds ColQwen2 late-interaction retrieval over
-  rendered page images to the Method 2 retriever set, fuses everything with RRF,
-  reranks, and hands both text evidence and original page images to a VLM.
-  The production-oriented architecture and the final row of the comparison table.
+  Hybrid visual multimodal RAG. Method 2's retriever set, unchanged, plus
+  ColQwen2 late-interaction retrieval over the rendered page images ingestion
+  already produced. A retrieved page contributes the chunks on that same page,
+  so provenance stays exact and the gold set, generator and judge are shared
+  with Methods 1 and 2. Measures the value of seeing the page.
 method: method3
 
-enrichment:
-  ocr_enabled: true
-  vlm_captions_enabled: true
-
-embedding:
-  visual_model: vidore/colqwen2-v1.0
-  visual_dim: 128
+# Everything not restated here -- enrichment, chunking, text and CLIP embedders,
+# router, reranker, generation, evaluation -- is Method 2's configuration, which
+# is what makes Method 3 a controlled extension of it rather than a new pipeline.
 
 retrieval:
-  top_k: 10
-  candidates_per_retriever: 50
   fusion_weights:
-    bm25: 1.0
-    dense: 1.0
-    table: 1.0
-    image: 0.7
-    visual_page: 1.5   # strongest single signal on chart/diagram queries
-  rerank_enabled: true
-  rerank_top_n: 25
+    # Method 2's weights are inherited unchanged. The page signal gets the
+    # neutral weight: tuning it against the gold set would tune the comparison.
+    visual_page: 1.0
+  # Method 2 floors three modalities at 8 in a pool of 25. Four modalities at 8
+  # would not fit, and the last registered -- the page signal -- would be cut to
+  # one candidate whenever the router fans out. 6 x 4 = 24 fits, so every fired
+  # modality keeps a floor while the cross-encoder budget stays at 25.
+  rerank_pool_per_modality: 6
 
-generation:
-  # The whole point: original page images go to the VLM alongside text evidence.
-  max_images: 3
-  image_detail: high
+visual:
+  device: auto
+  dtype: auto
+  model_revision: null
+  batch_size: 4
+  query_batch_size: 16
+  storage_dtype: float16
+  allow_cpu_indexing: false
+  use_query_cache: true

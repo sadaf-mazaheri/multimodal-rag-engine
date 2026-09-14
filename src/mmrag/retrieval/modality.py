@@ -1,9 +1,11 @@
-"""Method 2's retrieval orchestrator: route, fan out, fuse, rerank.
+"""The engine's retrieval orchestrator: route, fan out, fuse, rerank.
 
-**Ownership: unique to Method 2.** The counterpart to Method 1's
-``HybridRetriever``, which is left untouched.
+Generic over any registered ``Retriever`` set; :class:`mmrag.engine.RAGEngine`
+wraps it with metadata resolution and generation. Method 1's frozen
+``HybridRetriever`` is the only retrieval path that does not go through it.
 
-The shape of a query's journey:
+The shape of a query's journey (Method 2's retriever set shown; Method 3 adds
+``visual_page``):
 
     query -> router -> {bm25, dense, table, image} retrievers
           -> RRF within each modality        (text: bm25 + dense)

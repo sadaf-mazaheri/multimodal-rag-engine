@@ -1,8 +1,12 @@
 """Retrievers, rank fusion, routing, and reranking.
 
 Shared by every method: ``reciprocal_rank_fusion`` and ``CrossEncoderReranker``.
-Method 1 owns ``HybridRetriever``; Method 2 owns the router, the per-modality
-retrievers, and ``ModalityAwareRetriever``.
+The engine (:mod:`mmrag.engine`) uses the router, the ``Retriever``
+implementations -- ``BM25Retriever``, ``DenseRetriever``, ``TableRetriever``,
+``ImageRetriever`` and ``visual_page.VisualPageRetriever`` -- and
+``ModalityAwareRetriever``. Method 1's frozen pipeline owns ``HybridRetriever``.
+
+``visual_page`` is not imported here, so importing this package stays light.
 """
 
 from mmrag.retrieval.base import Hit, MetadataFilter, Retriever, RetrieverOutput

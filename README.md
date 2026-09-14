@@ -17,8 +17,8 @@ The question this repo tries to answer is not "can we chat with a PDF" — it is
 | **Text** | BM25 + dense hybrid | BM25 + dense | BM25 + dense |
 | **Tables** | → Markdown, then text retrieval | structure-aware retrieval | structure-aware retrieval |
 | **Figures** | → caption + OCR text | CLIP image embeddings | CLIP + ColQwen2 page vectors |
-| **Fusion** | RRF over 2 retrievers + rerank | best-route within each modality, RRF across, modality-floored rerank | *not yet implemented* |
-| **Generation** | text LLM | text LLM | **VLM, with original page images attached** |
+| **Fusion** | RRF over 2 retrievers + rerank | best-route within each modality, RRF across, modality-floored rerank | Method 2's fusion + a page signal that always fires, same rerank |
+| **Generation** | text LLM | text LLM | text LLM — the same generator, so answers stay comparable |
 | **Measures** | the cost of flattening | the value of preserving modality | the value of seeing the page |
 
 ---
@@ -32,7 +32,7 @@ This project is being built in stages. Current state:
 - [x] **Step 2** — Shared ingestion: PDF → elements with rich metadata and provenance
 - [x] **Step 3** — Method 1: Textified hybrid RAG
 - [x] **Step 4** — Method 2: Modality-aware retrieval + query router
-- [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2) — *not implemented yet*
+- [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2) — *implemented and tested on CPU; the GPU page-index build and benchmark run are pending*
 - [x] **Step 6** — Evaluation harness: retrieval metrics, then generation scored by an LLM judge
 
 Step 6 was built before Step 5 on purpose: two methods with no numbers were
@@ -66,6 +66,53 @@ endpoints (properties of *your machine*). `configs/*.yaml` holds chunk sizes,
 model names and `top_k` (properties of *the experiment*). A run is fully
 described by "this YAML, on this corpus" — which is the whole basis of
 reproducibility.
+
+---
+
+## System architecture
+
+The three methods are **configurations of one system**, not three systems.
+Retrieval signals are pluggable components behind one contract, and a single
+engine routes, fuses, reranks and answers over whichever set it is given:
+
+```
+                 ┌─────────────────────── RAGEngine ───────────────────────┐
+query ─→ metadata resolution ─→ router ─→ retrievers ─→ fusion ─→ rerank ─→ Answerer ─→ cited answer
+         (doc_id filters)       (which     │ bm25        within      cross-     context budget,
+                                modalities)│ dense       modality,   encoder    prompt, provider,
+                                           │ table       then        over a     citation
+                                           │ image       weighted    modality-  resolution,
+                                           │ visual_page RRF across  floored    refusal
+                                                                     pool
+```
+
+| Layer | Module | What it owns |
+|---|---|---|
+| Ingestion | `ingestion/` | PDF → `Document`/`Page`/`Element` with provenance, page renders |
+| Index components | `indexing/` | Building indexes from the corpus and opening retrievers over them: `ModalityIndex` (chunk set + text/table/figure sub-indexes), `VisualPageIndexer` (ColQwen2 page index + query cache) |
+| Storage adapters | `stores/` | BM25, Qdrant, Postgres, the file-based multi-vector page store |
+| Retrievers | `retrieval/` | The `Retriever` protocol and its implementations; router, fusion, reranker |
+| Engine | `engine.py` | `RAGEngine`: the query path above, over any registered retrievers |
+| Generation | `generation/` | Prompting, providers, citation resolution |
+| Methods | `methods/` | Named configurations: which indexes, which retrievers, which always fire |
+| Evaluation | `evaluation/` | Consumes `method.retrieve()` / `method.answer()`; nothing in the runtime imports it |
+
+| Method | Configuration |
+|---|---|
+| Method 1 | Frozen single-index pipeline (`HybridRetriever`), kept exactly as measured |
+| Method 2 | `RAGEngine` over `ModalityIndex("method2")`: `bm25`, `dense`, `table`, `image` |
+| Method 3 | `RAGEngine` over the same `ModalityIndex` (read-only) + `VisualPageIndexer`: Method 2's four plus `visual_page`, always on |
+
+Adding a retrieval signal means implementing `Retriever.retrieve(query, k,
+filters) -> RetrieverOutput` and registering it; routing, fusion, pooling,
+reranking, generation and evaluation need no change. Method 3 is the proof: it
+is Method 2's configuration plus one retriever, with no subclassing and no
+special case downstream.
+
+Method 1 is the one exception. Its fusion is single-stage and it predates the
+`Retriever` protocol; porting it onto the engine would risk moving numbers that
+are already recorded, so it stays as it was measured. It exposes the same
+method surface, so the CLI and evaluation treat all three identically.
 
 ---
 
@@ -237,7 +284,7 @@ document's typography has been observed.
 
 Output goes to Postgres *and* to a JSON sidecar per document under
 `data/processed/`. The sidecar exists so an index can be built on a machine with
-no database — Method 3's visual index is planned to be built that way on a GPU —
+no database — Method 3's page index is built that way on a GPU machine —
 and because debugging a parse should not require SQL. Both are written from the
 same objects, so they cannot drift.
 
@@ -548,6 +595,141 @@ asymmetries that Step 6 has to control for.
 
 ---
 
+## Method 3 — Hybrid Visual RAG
+
+Method 2's retrievers, unchanged, plus **ColQwen2 late-interaction retrieval over
+the rendered pages** ingestion already produced. A late-interaction model keeps a
+128-d vector per image patch; a query keeps one per token, and a page scores the
+sum of each query token's best-matching patch. It can match a query word to an
+axis label, a table cell or a diagram box with no text ever extracted from the
+page — which is what Method 3 measures: the value of seeing the page.
+
+**Status: implemented, not yet run.** The code and its tests run on CPU; the full
+page index needs a GPU machine, and no Method 3 results exist yet.
+
+### How it stays a controlled comparison
+
+- **Same corpus, same pixels.** Pages are the 150-dpi renders under
+  `data/processed/<doc>/pages/`, checked against `configs/corpus.lock.yaml`.
+- **Method 2's retrieval, read-only.** Method 3 opens Method 2's chunk set, BM25
+  and Qdrant indexes, router, resolver and cross-encoder, and never writes them.
+  It writes only the visual page index, `data/indexes/visual_pages/`. That
+  index belongs to the corpus, not to Method 3: it depends on the page renders,
+  the corpus lock and the model, and on no chunk set.
+- **A page hit becomes that page's chunks.** The gold set's evidence is
+  `(doc_id, page, modality)` and the generator reads text, so a retrieved page
+  contributes the Method 2 chunks on that exact page, in document order, each
+  carrying the page's score. Provenance stays exact, nothing crosses a page, and
+  evaluation, generation and judging need no special case. A page with no chunks
+  — 10 of 951 — can be scored but contributes nothing, and is counted.
+- **Same generator and judge.** No page images are attached, so answer-quality
+  differences stay attributable to retrieval.
+
+Two configuration differences from Method 2, both in `configs/method3.yaml`:
+
+| setting | Method 2 | Method 3 | why |
+|---|---|---|---|
+| `fusion_weights.visual_page` | — | 1.0 | neutral; tuning it on the gold set would tune the comparison |
+| `rerank_pool_per_modality` | 8 | 6 | four modalities at 8 overflow the pool of 25 and would cut the page signal to one candidate; 6 × 4 fits, and the cross-encoder still sees 25 |
+
+The page signal fires on every query, as text does: it sees every modality on a
+page at once. The cross-encoder still reads chunk text only, so the page signal
+decides which chunks it considers, not their final order.
+
+### Running it
+
+**On Google Colab (recommended)** — no repository checkout needed there. Pack
+one self-contained bundle, run the GPU runner on it, and unzip the result at the
+repository root. Step by step in [`docs/m3_colab.md`](docs/m3_colab.md), or
+open `notebooks/m3_colab_gpu.ipynb`:
+
+```bash
+python scripts/pack_m3_colab.py        # -> dist/m3_colab_bundle.zip, upload to Drive
+# on Colab: python m3_colab/run_m3_gpu.py all --out /content/m3_out --work-dir <Drive>/work
+# back here: extract m3_visual_pages.zip at the repository root
+```
+
+The runner ships the repository's own encoder and index-store modules, so it
+writes exactly the format `mmrag` reads. It checkpoints every page to Drive, so
+a disconnected session resumes, and it runs a smoke test before the full
+build. `tests/test_m3_colab_runner.py` packs a synthetic corpus, runs every
+stage and opens the result with the main repository's validator.
+
+**On a GPU machine with the full repository**, with `data/processed/` and
+`data/indexes/method2/chunks.jsonl` copied over:
+
+```bash
+pip install -e ".[visual]"
+mmrag index build --config method3 --device cuda --max-pages 4   # smoke test, partial
+mmrag index build --config method3 --device cuda                 # full page index
+mmrag index embed-queries --config method3 --device cuda         # gold + unanswerable queries
+```
+
+Either way, on the machine that ran Methods 1 and 2:
+
+```bash
+mmrag index status --config method3
+mmrag eval run --config method3 --tag rerank
+```
+
+`--device` accepts `auto`, `cpu`, `mps`, `cuda` or `cuda:N`; an explicit device
+that is not present is an error, never a silent fallback. A CPU build is refused
+unless `--allow-cpu` is given. `mmrag eval run` refuses a partial index built
+with `--doc-id` or `--max-pages`.
+
+### What the index records
+
+`data/indexes/visual_pages/index/index.json` records the model name, pinned
+revision and resolved commit, device and dtype, library versions, processor
+settings, image DPI, the corpus lockfile's SHA-256 and every document's source
+hash, the hash of the chunk set pages will expand into, whether the build
+covered the whole corpus, and SHA-256 checksums of the embedding, offset and
+page files. Loading verifies all of it: an index whose files, model or corpus
+have drifted is refused, and a complete index that lacks a page carrying a chunk
+is refused when a retriever is opened over that chunk set. The index directory
+is written aside and swapped in by rename, so an interrupted build leaves the
+previous index intact. The query cache (`visual_pages/query_cache/`) is bound to
+one model identity in the same way, and every Method 3 run records the index's
+embedding checksum and model in its environment.
+
+### Page → chunk expansion, and its known costs
+
+A page hit contributes the chunks on that page, each carrying the page's score.
+That is what keeps provenance, evaluation and generation unchanged, and it is
+the design the first Method 3 run will measure. It has costs that are visible
+before any number exists, and they are recorded here rather than tuned away on
+the gold set:
+
+- **The candidate budget is spent in chunks, not pages.** 50 candidates may be
+  only a handful of pages when pages are dense, and the rerank floor of 6 for
+  `visual_page` can be one page's chunks.
+- **Chunks on one page tie on score but not on rank.** RRF reads rank, so a
+  page's first chunk in reading order gets more credit than its last.
+- **The cross-encoder reads chunk text only.** A page found by its pixels is
+  judged by its extracted text, which is thinnest exactly where the page signal
+  should help most.
+
+The alternative, if the first run shows these matter, is to keep ranking at page
+level through fusion (all of a page's chunks share its rank, and the floor is
+counted in pages), with page images passed to a vision-capable generator as a
+separate generation experiment. `VisualPageRetriever.rank_pages()` already
+exposes the page ranking on its own, so that change is local to the retriever.
+
+### Requirements
+
+- **Model:** `vidore/colqwen2-v1.0` (Qwen2-VL-2B base plus adapter), roughly
+  4.5 GB to download.
+- **GPU:** 16 GB of VRAM is comfortable. `dtype: auto` uses bfloat16 where
+  supported (L4, A10, A100 and newer) and float16 otherwise (T4). If float16
+  produces NaNs, the build stops and says so; set `visual.dtype: float32`.
+  Out-of-memory errors halve the batch size and retry.
+- **Index size:** every page keeps several hundred float16 vectors, on the order
+  of 200 MB for the corpus.
+- **CPU fallback:** query encoding on CPU works but needs ~9 GB of RAM; the query
+  cache avoids it.
+
+---
+
 ## Evaluation
 
 ```bash
@@ -782,27 +964,37 @@ src/mmrag/
     flatten.py        what to index, and what the flattening lost
     chunker.py        elements → retrieval units, provenance preserved
     tokens.py         token counting + sentence segmentation
-  embeddings/       local text / image / visual embedders
-  stores/           Postgres + Qdrant + BM25 index adapters
-  retrieval/        RRF fusion + reranking (shared)
-    hybrid.py         Method 1's BM25 + dense retriever
-    router.py         Method 2's query router
-    modality.py       Method 2's route/fan-out/fuse orchestrator
-    views.py          table schema vs content views
-    metadata.py       Postgres -> doc_id filters
-docs/architecture.md  which components are shared vs method-specific
+  embeddings/       local text / image (CLIP) / visual (ColQwen2) embedders
+  stores/           storage adapters: Postgres, Qdrant, BM25,
+    multivector.py    file-based multi-vector page store, MaxSim, query cache
+  indexing/         index components: build from the corpus, open retrievers
+    modality.py       chunk set + text/table/figure sub-indexes
+    visual_pages.py   ColQwen2 page index: GPU build, validation, query cache
+  retrieval/        the Retriever protocol and everything the engine composes
+    base.py           Retriever, RetrieverOutput, MetadataFilter
+    modality_retrievers.py  bm25, dense, table, image retrievers
+    visual_page.py    visual_page retriever (page ranking -> same-page chunks)
+    router.py         query router, with always-on modalities
+    modality.py       route -> fan out -> two-stage fusion -> floored rerank pool
+    fusion.py, rerank.py, metadata.py, views.py
+    hybrid.py         Method 1's frozen BM25 + dense retriever
+  engine.py         RAGEngine: resolve -> retrieve -> fuse -> rerank -> answer
   generation/       provider interface (openai | local | echo) + answerer
-  methods/          the three end-to-end pipelines
+  methods/          benchmark configurations of the system
+    base.py           RAGMethod contract, EngineMethod
+    registry.py       config.method -> method class
     method1_textified.py   (frozen)
-    method2_modality.py
+    method2_modality.py    engine over ModalityIndex("method2")
+    method3_visual.py      same, read-only, plus the visual page index
   evaluation/       gold sets, retrieval metrics and runner, generation runner,
                     LLM judge, response cache, comparison reports
+docs/architecture.md  component ownership, and what is shared vs method-specific
 data/eval/gold/     versioned, hand-verified gold sets: retrieval + generation (committed)
 data/eval/runs/     retrieval run records (gitignored)
 data/eval/generation/  generation and judged run records (gitignored)
 data/eval/cache/    content-addressed LLM response cache (gitignored)
 tests/baselines/    frozen Method 1 chunk set
-notebooks/          reserved for Method 3 GPU indexing (empty -- not implemented)
+notebooks/          unused -- Method 3 GPU indexing runs from the CLI
 ```
 
 ---
@@ -814,11 +1006,12 @@ default text embedder precisely because it is usable without a GPU. The one CPU
 cost that matters is the cross-encoder, which dominates query latency (see
 [Retrieval results](#retrieval-results)).
 
-Method 3 is **not implemented yet**. The plan: ColQwen2 page embedding is roughly
-1–5 s/page on CPU, impractical for a corpus of this size, so the visual index
-would be built on a GPU (Colab/Kaggle) and exported for local use, with fusion,
-reranking and generation running locally against it. `notebooks/` is reserved for
-that and currently empty.
+Method 3 is the exception, and only for encoding. Building its page index runs
+ColQwen2 over every page, which is impractical on CPU, so it is done on a GPU
+machine and the index is copied back. Scoring pages is plain numpy, and query
+embeddings can be precomputed on the same GPU machine, so Method 3's retrieval
+benchmark runs on the same CPU, Qdrant and cross-encoder as Methods 1 and 2. See
+[Method 3](#method-3--hybrid-visual-rag) for the commands and requirements.
 
 ---
 

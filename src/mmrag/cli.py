@@ -13,6 +13,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
@@ -460,29 +461,56 @@ def _load_method(config_name: str) -> Any:
     them against each other.
     """
     from mmrag.config import load_experiment_config
-    from mmrag.methods import Method1Textified, Method2ModalityAware
 
     cfg = load_experiment_config(config_name)
-    builders = {
-        "method1": Method1Textified,
-        "method2": Method2ModalityAware,
-    }
-    builder = builders.get(cfg.method)
-    if builder is None:
-        raise typer.BadParameter(
-            f"config '{config_name}' selects {cfg.method}, which is not implemented yet"
-        )
-    return cfg, builder(cfg)
+    return cfg, _build_method(cfg)
+
+
+def _build_method(cfg: Any) -> Any:
+    from mmrag.methods import build_method
+
+    try:
+        return build_method(cfg)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @index_app.command("build")
 def index_build(
     config_name: str = typer.Option("method1", "--config", "-c"),
     doc_id: list[str] = typer.Option(None, "--doc-id", "-d", help="Restrict to these documents"),
+    device: str | None = typer.Option(
+        None, "--device", help="Method 3 only: auto | cpu | mps | cuda | cuda:N"
+    ),
+    allow_cpu: bool = typer.Option(
+        False, "--allow-cpu", help="Method 3 only: permit a (slow) CPU page index build"
+    ),
+    batch_size: int | None = typer.Option(
+        None, "--batch-size", min=1, help="Method 3 only: pages per forward pass"
+    ),
+    max_pages: int | None = typer.Option(
+        None, "--max-pages", min=1, help="Method 3 only: index just the first N pages (smoke test)"
+    ),
 ) -> None:
-    """Chunk the parsed corpus and build this method's indexes."""
-    _, method = _load_method(config_name)
-    report = method.build_index(doc_ids=list(doc_id) if doc_id else None)
+    """Chunk the parsed corpus and build this method's indexes.
+
+    For Method 3 this builds only the ColQwen2 page index; Method 2's indexes are
+    reused as they are and must already exist wherever retrieval runs.
+    """
+    cfg, method = _load_method(config_name)
+    ids = list(doc_id) if doc_id else None
+    visual_options = {"device": device, "allow_cpu": allow_cpu or None,
+                      "batch_size": batch_size, "max_pages": max_pages}
+
+    if cfg.method == "method3":
+        _build_method3_index(method, ids, visual_options)
+        return
+    if any(v is not None for v in visual_options.values()):
+        raise typer.BadParameter(
+            "--device/--allow-cpu/--batch-size/--max-pages apply to method3 only"
+        )
+
+    report = method.build_index(doc_ids=ids)
 
     console.print(
         f"[green]Built '{report.variant}' index[/] in {report.elapsed_s:.1f}s: "
@@ -524,6 +552,78 @@ def index_build(
         console.print(f"[dim]embedders: {report.embedders}[/]")
 
 
+def _build_method3_index(method: Any, doc_ids: list[str] | None, options: dict[str, Any]) -> None:
+    from mmrag.embeddings.visual import (
+        DeviceUnavailableError,
+        VisualEncodingError,
+        VisualModelUnavailableError,
+    )
+    from mmrag.indexing.visual_pages import CpuIndexingRefusedError
+    from mmrag.stores.multivector import IndexIntegrityError
+
+    try:
+        report = method.build_index(doc_ids=doc_ids, **options)
+    except (CpuIndexingRefusedError, DeviceUnavailableError, VisualModelUnavailableError,
+            VisualEncodingError,
+            IndexIntegrityError, FileNotFoundError) as exc:
+        console.print(f"[red]{type(exc).__name__}:[/] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[green]Built Method 3 page index[/] in {report.elapsed_s:.1f}s: {report.n_pages} pages "
+        f"from {report.n_documents} documents, {report.n_tokens:,} token vectors "
+        f"({report.index_bytes / 1e6:.0f} MB) on {report.device} as {report.dtype}"
+    )
+    console.print(f"  tokens per page: {report.tokens_per_page}")
+    console.print(f"  model: {report.model}")
+    if report.pages_without_chunks:
+        console.print(
+            f"[yellow]{report.pages_without_chunks}[/] indexed pages carry no chunk in the "
+            "method2 chunk set, "
+            "so retrieving them contributes nothing downstream."
+        )
+    if not report.complete:
+        console.print("[yellow]Partial index (--doc-id/--max-pages): usable for smoke tests, "
+                      "refused by 'mmrag eval run'.[/]")
+    console.print(f"[dim]{report.index_dir}[/]")
+
+
+@index_app.command("embed-queries")
+def index_embed_queries(
+    config_name: str = typer.Option("method3", "--config", "-c"),
+    gold_path: str = typer.Option(DEFAULT_GOLD, "--gold"),
+    generation_gold_path: str = typer.Option(DEFAULT_GENERATION_GOLD, "--generation-gold"),
+    extra: list[str] = typer.Option(None, "--query", "-q", help="Additional query text"),
+    device: str | None = typer.Option(None, "--device"),
+    batch_size: int | None = typer.Option(None, "--batch-size", min=1),
+) -> None:
+    """Precompute Method 3 query embeddings for every benchmark query.
+
+    Covers the retrieval gold queries and the generation gold's unanswerable
+    questions, so the retrieval benchmark and generation can run on a machine
+    without the ColQwen2 model.
+    """
+    from mmrag.embeddings.visual import DeviceUnavailableError, VisualModelUnavailableError
+    from mmrag.evaluation.generation_gold import GenerationGold
+    from mmrag.stores.multivector import IndexIntegrityError
+
+    cfg, method = _load_method(config_name)
+    if cfg.method != "method3":
+        raise typer.BadParameter("embed-queries applies to method3 configs only")
+
+    queries = [q.query for q in _load_gold(gold_path).queries]
+    if Path(generation_gold_path).exists():
+        queries += [u.query for u in GenerationGold.load(generation_gold_path).unanswerable]
+    queries += list(extra or [])
+
+    try:
+        stats = method.embed_queries(queries, device=device, batch_size=batch_size)
+    except (DeviceUnavailableError, VisualModelUnavailableError, IndexIntegrityError) as exc:
+        console.print(f"[red]{type(exc).__name__}:[/] {escape(str(exc))}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]query embeddings[/] {stats} -> {method.query_cache_dir}")
+
+
 @index_app.command("status")
 def index_status(
     config_name: str = typer.Option("method1", "--config", "-c"),
@@ -533,7 +633,19 @@ def index_status(
 
     from mmrag.methods.method1_textified import MANIFEST_FILE
 
-    _, method = _load_method(config_name)
+    cfg, method = _load_method(config_name)
+    if cfg.method == "method3":
+        try:
+            info = method.describe_visual_index()
+        except Exception as exc:
+            console.print(f"[red]{type(exc).__name__}:[/] {escape(str(exc))}")
+            raise typer.Exit(code=1) from exc
+        for key, value in info.items():
+            console.print(f"  {key}: {value}")
+        console.print("[dim]Method 3 also reads Method 2's indexes: "
+                      "mmrag index status --config method2[/]")
+        return
+
     manifest = method.index_dir / MANIFEST_FILE
     if not manifest.exists():
         console.print(f"[red]No index at {method.index_dir}.[/] Run 'mmrag index build'.")
@@ -799,7 +911,8 @@ def doctor() -> None:
 
         row("colpali-engine", True, "installed")
     except ImportError:
-        row("colpali-engine", None, "Method 3 visual index must be built out-of-band")
+        row("colpali-engine", None,
+            'Method 3 page encoding -- pip install -e ".[visual]" on a GPU machine')
 
     console.print(table)
 
@@ -923,7 +1036,6 @@ def eval_run(
     from mmrag.config import load_experiment_config
     from mmrag.evaluation.report import render, save_run
     from mmrag.evaluation.retrieval_eval import run_evaluation
-    from mmrag.methods import Method1Textified, Method2ModalityAware
 
     gold = _load_gold(gold_path)
     config = load_experiment_config(config_name)
@@ -935,11 +1047,28 @@ def eval_run(
     if no_metadata:
         overrides["use_metadata"] = False
 
-    builders = {"method1": Method1Textified, "method2": Method2ModalityAware}
-    builder = builders.get(config.method)
-    if builder is None:
-        raise typer.BadParameter(f"{config.method} is not implemented yet")
-    method = builder(config)
+    method = _build_method(config)
+
+    visual_fingerprint: dict[str, str] = {}
+    if config.method == "method3":
+        # A benchmark number from a partial or mismatched page index would be a
+        # fake result, so it is refused before any query runs.
+        try:
+            info = method.describe_visual_index()
+        except Exception as exc:
+            console.print(f"[red]{type(exc).__name__}:[/] {escape(str(exc))}")
+            raise typer.Exit(code=1) from exc
+        if not info["complete"]:
+            console.print("[red]The Method 3 page index is a partial test build.[/] Rebuild it "
+                          "over the whole corpus before evaluating.")
+            raise typer.Exit(code=1)
+        visual_fingerprint = {
+            "visual_index_version": str(info["index_version"]),
+            "visual_model": str(info["model"]),
+            "visual_index_device": f"{info['device']}/{info['dtype']}",
+            "visual_embeddings_sha256": str(info["embeddings_sha256"]),
+            "visual_query_cache": str(info["cached_queries"]),
+        }
 
     label = tag or ("no-rerank" if no_rerank else None)
     console.print(
@@ -975,6 +1104,7 @@ def eval_run(
             on_query=advance,
         )
 
+    run.environment.update(visual_fingerprint)
     stamp = run.started_at.replace(":", "").replace("-", "")
     suffix = f"_{label}" if label else ""
     path = save_run(run, Path(out_dir) / f"{stamp}_{run.method}{suffix}.json")
@@ -1028,15 +1158,11 @@ def eval_compare(
 def _method_from_run(run: Any):
     """Rebuild the exact method a retrieval run used, including its overrides."""
     from mmrag.config import ExperimentConfig
-    from mmrag.methods import Method1Textified, Method2ModalityAware
 
     config = ExperimentConfig.model_validate(run.config)
     if run.overrides.get("rerank_enabled") is False:
         config.retrieval.rerank_enabled = False
-    builders = {"method1": Method1Textified, "method2": Method2ModalityAware}
-    if config.method not in builders:
-        raise typer.BadParameter(f"{config.method} is not supported for generation")
-    return config, builders[config.method](config)
+    return config, _build_method(config)
 
 
 def _resolve_recorded_path(recorded: str | None) -> Path | None:

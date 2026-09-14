@@ -5,6 +5,31 @@ one. This is the document to read before changing anything: editing a shared
 component changes every method's numbers at once, which is how a benchmark
 quietly stops being a controlled experiment.
 
+## Engine and configurations
+
+Methods 2 and 3 are configurations of `RAGEngine` (`engine.py`), not a class
+hierarchy. The engine composes a set of `Retriever`s, a router, the two-stage
+fusion and rerank pool (`retrieval/modality.py`), an optional metadata resolver,
+and the `Answerer`. Index components (`indexing/`) build indexes and open
+retrievers; they know nothing about routing or generation.
+
+| | indexes | retrievers | always on |
+|---|---|---|---|
+| Method 2 | `ModalityIndex("method2")` | `bm25`, `dense`, `table`, `image` | — |
+| Method 3 | `ModalityIndex("method2")`, read-only; `VisualPageIndexer` | Method 2's four, then `visual_page` | `visual_page` |
+
+Method 3 used to subclass Method 2 and override its index directory and
+retriever assembly. That made the visual capability reachable only through the
+Method 2 pipeline class, gave `build_index` two incompatible meanings, and needed
+a router wrapper. It is now composition: the refactor was checked to leave
+Method 2's retrieval bit-identical — chunk ids, scores, ranks, routing and
+diagnostics over all 42 gold queries, with and without metadata resolution —
+and the recorded reranked Method 2 run reproduces.
+
+The visual page index lives at `data/indexes/visual_pages/` because it is a
+property of the corpus (renders, lockfile, model), not of any method or chunk
+set; the chunk set it expands into is supplied when a retriever is opened.
+
 ## The rule
 
 > **One ingestion, one chunker, one generation path. Methods differ only in how
@@ -61,7 +86,9 @@ Everything below is new. None of it touches Method 1.
 
 | Component | Module | Role |
 |---|---|---|
-| Pipeline | `methods/method2_modality.py` | Per-modality index build, routed retrieval |
+| Configuration | `methods/method2_modality.py` | `ModalityIndex` + `RAGEngine` |
+| Index component | `indexing/modality.py` | Chunk set and per-modality sub-index build, retriever opening |
+| Engine | `engine.py` | Metadata resolution → retrieval → answer |
 | Query router | `retrieval/router.py` | Lexical signals → which modalities to fire |
 | Orchestrator | `retrieval/modality.py` | Route → fan out → fuse → rerank |
 | Retrievers | `retrieval/modality_retrievers.py` | `bm25`, `dense`, `table`, `image` |

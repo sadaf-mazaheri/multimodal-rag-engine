@@ -1,11 +1,12 @@
-"""Multimodal RAG benchmark.
+"""Multimodal RAG.
 
-Three retrieval architectures are implemented over one shared ingestion layer so
-their results are directly comparable:
+One engine (``engine.RAGEngine``) routes, fuses, reranks and answers over
+pluggable retrievers opened by index components (``indexing``). The benchmark
+methods are configurations of it, over one shared ingestion layer:
 
-* ``methods.method1_textified``  -- everything flattened to text, hybrid BM25 + dense.
+* ``methods.method1_textified``  -- everything flattened to text, hybrid BM25 + dense (frozen).
 * ``methods.method2_modality``   -- per-modality retrievers behind a query router.
-* ``methods.method3_visual``     -- adds late-interaction visual page retrieval.
+* ``methods.method3_visual``     -- Method 2's retrievers plus visual page retrieval.
 """
 
 __version__ = "0.1.0"
