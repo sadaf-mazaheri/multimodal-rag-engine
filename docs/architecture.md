@@ -10,7 +10,7 @@ quietly stops being a controlled experiment.
 Methods 2 and 3 are configurations of `RAGEngine` (`engine.py`), not a class
 hierarchy. The engine composes a set of `Retriever`s, a router, the two-stage
 fusion and rerank pool (`retrieval/modality.py`), an optional metadata resolver,
-and the `Answerer`. Index components (`indexing/`) build indexes and open
+and the answerer `generation.pipeline` selects. Index components (`indexing/`) build indexes and open
 retrievers; they know nothing about routing or generation.
 
 | | indexes | retrievers | always on |
@@ -61,7 +61,7 @@ simultaneously and invalidates prior measurements.
 | Postgres | `stores/postgres.py` | Document/page/element metadata |
 | Rank fusion | `retrieval/fusion.py` | Weighted RRF + contribution diagnostics |
 | Reranking | `retrieval/rerank.py` | Cross-encoder |
-| Generation | `generation/` | Providers, citation resolution, and two pipelines selected by `generation.pipeline`: V1 `Answerer` (default, frozen) and V2 `AnswererV2` — see [Generation pipelines](#generation-pipelines) |
+| Generation | `generation/` | Providers, citation resolution, and three pipelines selected by `generation.pipeline`: V1 `Answerer` (default, frozen), and V2.0 and V2.1, two prompt variants of `AnswererV2` — see [Generation pipelines](#generation-pipelines) |
 | CLI | `cli.py` | Same commands for every method, dispatched on `cfg.method` |
 
 ---
@@ -172,8 +172,10 @@ Both methods:
 - read the **same** `parsed.json` sidecars produced by one ingestion run
 - chunk with the **same** `Chunker` and the same `ChunkingConfig` defaults
 - inherit from the same `configs/default.yaml`
-- answer through the **same** `Answerer`, prompt, and provider
-- attach **no images** to the model (that is Method 3's defining move)
+- answer through the **same** generation pipeline, prompt, and provider — whichever
+  `generation.pipeline` a run selects, every method in that run uses it
+- attach **no images** to the model — none of the three methods does; Method 3 sees
+  pages at retrieval time only
 - record provenance the same way, so citations are directly comparable
 
 They differ in exactly three places: how chunks are partitioned into indexes,
@@ -263,24 +265,55 @@ Generation is shared by every method, and so is the choice of pipeline: a run
 generates M1, M2 and M3 answers with the same pipeline, never a different one per
 method.
 
-| | V1 (default) | V2 |
-|---|---|---|
-| Module | `generation/answerer.py` | `generation/evidence.py`, `answerer_v2.py`, `validation.py` |
-| Source text | `[n] <title> - page N (<type>)` + chunk text, in retrieval order | Same sources and numbers; shown grouped by page, header `[n] <title> · page N · <modality> · <section>`, breadcrumb removed, captions labelled |
-| Budget | 6,000 tokens, skip what overflows | Identical rule |
-| Model calls | 1 | 1, same model, temperature, seed and output cap |
-| Instructions | concise; refuse if the answer is absent | direct answer with the sources' specifics; describe named tables/figures; partial answers; refuse only when nothing is relevant |
-| Citations | `[n]` → `resolve_citations` | Same function, same provenance |
-| After the call | refusal flag | refusal flag + deterministic `ValidationReport`; the answer is never edited |
-| Prompt version | `1ae772d0aa197ff5`, pinned by a golden test | its own, covering prompts, template and evidence format |
+| | V1 (default) | V2.0 | V2.1 |
+|---|---|---|---|
+| `generation.pipeline` | `v1` | `v2` | `v2.1` |
+| Module | `generation/answerer.py` | `generation/evidence.py`, `answerer_v2.py`, `validation.py` | same modules as V2.0; a prompt variant of `AnswererV2` |
+| Source text | `[n] <title> - page N (<type>)` + chunk text, in retrieval order | Same sources and numbers; shown grouped by page, header `[n] <title> · page N · <modality> · <section>`, breadcrumb removed, captions labelled | Identical to V2.0 |
+| Budget | 6,000 tokens, skip what overflows | Identical rule | Identical rule |
+| Model calls | 1 | 1, same model, temperature, seed and output cap | 1, same |
+| Instructions | concise; refuse if the answer is absent | direct answer with the sources' specifics; describe named tables/figures; partial answers; refuse only when nothing is relevant | V2.0's, plus: answer only about the subject the question names, never a similar or different entity, version or year, and refuse when the sources only describe one; each factual sentence ends with its own citation |
+| Citations | `[n]` → `resolve_citations` | Same function, same provenance | Same |
+| After the call | refusal flag | refusal flag + deterministic `ValidationReport`; the answer is never edited | Same |
+| Prompt version | `1ae772d0aa197ff5`, pinned by a golden test | `55aea920ebb01b97` | `c9830e3efb5505f1` |
+| Run label | `<run>` | `<run>+genv2` | `<run>+genv2.1` |
 
-**Isolation.** Evaluation keys every cached answer by prompt version, so V1 and V2
-answers cannot replay each other. A V2 generation run is labelled `+genv2`. Records
-gain optional `pipeline`, `answer_chars`, `answer_sentences` and `validation`
-fields, so artefacts written before V2 still load and score identically. The judge
-is unchanged and sees each pipeline's source text exactly as its generator did.
+**V2.0 and V2.1 are one implementation.** `AnswererV2` takes a `variant`, and
+`answerer_v2.VARIANTS` maps each variant to its prompt pair and prompt version. The
+evidence pack, the user-message template and the validator are shared, so a variant
+can differ from V2.0 only in what its prompts say. Each variant's version hashes its
+own prompts together with the template and the evidence-format version, so changing
+either shared piece changes every variant's cache keys.
 
-**What V2 does not change:** retrieval, Method 3, indexes, gold files, the judge
+**Why V2.1 exists.** V2.0 was generated for every arm and inspected before
+judging. It answered a question about one product from another product's evidence,
+because it refused "only if no source contains information relevant to the
+question", and it cited per paragraph rather than per sentence. V2.1 fixes both in
+the prompt alone. V2.0 is kept, unjudged, as the record of what the first prompt did.
+
+**Validator.** `AnswerValidator` is the same for every pipeline, and evaluation runs
+it on every record, V1 included, so its checks are comparable across pipelines. It
+checks sentence citation coverage, unresolved citations, whether each number or
+identifier appears in a source its sentence cites, and mixed refusals. Identifiers
+in uncited refusals and statements about what the sources lack ("the sources do not
+mention the H100") are not grounded, since they name what is missing; a sentence
+that cites anything, or is merely short, is still checked in full.
+
+**Isolation.** Evaluation keys every cached answer by prompt version, so no two
+pipelines can replay each other's answers, and their run labels differ. Records gain
+optional `pipeline`, `answer_chars`, `answer_sentences` and `validation` fields, so
+artefacts written before V2 still load and score identically. The judge is unchanged
+and sees each pipeline's source text exactly as its generator did.
+
+**Comparing pipelines.** OpenAI's backend for `gpt-4o-mini` changes over time, and a
+fixed seed does not pin output across backends: re-running V1 with byte-identical
+prompts reproduced only 32–33 of 50 answers and moved grounded correctness by up to
+three questions. A pipeline comparison is therefore made against a V1 run generated
+and judged the same day with `--no-cache`, never against an older V1 run. Results
+and caveats are in the README's
+[Generation V1 and V2](../README.md#generation-v1-and-v2).
+
+**What V2.x does not change:** retrieval, Method 3, indexes, gold files, the judge
 prompt and schema, and every score computed from a verdict.
 
 ---
