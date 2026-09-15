@@ -43,6 +43,9 @@ data/eval/runs/**
 # potentially large, and the cache is reproducible from its requests.
 data/eval/generation/**
 data/eval/cache/**
+# Production-evaluation reports: derived from the runs above and reproducible.
+data/eval/production/**
+!data/eval/production/.gitkeep
 
 # --- Model caches ---
 .cache/

@@ -43,6 +43,11 @@ app.add_typer(config_app, name="config")
 app.add_typer(ingest_app, name="ingest")
 app.add_typer(index_app, name="index")
 app.add_typer(eval_app, name="eval")
+prod_app = typer.Typer(
+    help="Production metrics (latency, tokens, cost, reliability, failures) from saved runs.",
+    no_args_is_help=True,
+)
+app.add_typer(prod_app, name="prod")
 
 DEFAULT_GOLD = "data/eval/gold/v1.yaml"
 DEFAULT_GENERATION_GOLD = "data/eval/gold/generation_v1.yaml"
@@ -1549,6 +1554,63 @@ def eval_judge(
 
     render_judged([result], console=console)
     console.print(f"[green]saved[/] {path}")
+
+
+# ---------------------------------------------------------------------------
+# prod
+# ---------------------------------------------------------------------------
+
+
+@prod_app.command("report")
+def prod_report(
+    generation_run_path: str = typer.Option(..., "--generation-run", help="Generation run JSON"),
+    retrieval_run_path: str | None = typer.Option(
+        None, "--retrieval-run", help="Default: the path the generation run recorded"),
+    judged_run_path: str | None = typer.Option(
+        None, "--judged-run", help="Judged run of this generation run, for failure buckets"),
+    pricing_path: str = typer.Option("configs/pricing.yaml", "--pricing"),
+    repeats: int = typer.Option(5, "--repeats", min=1, max=50,
+                                help="Repetitions per query when timing prompt building"),
+    no_prompt_timing: bool = typer.Option(False, "--no-prompt-timing",
+                                          help="Skip the offline prompt/post-processing timing"),
+    out_dir: str = typer.Option("data/eval/production", "--out"),
+) -> None:
+    """Production metrics for one generation run, from saved artifacts only.
+
+    No provider is called and no retrieval is re-run. Prompt construction and
+    post-processing are re-measured offline and checked against the recorded
+    prompt sha256. composed_e2e_latency is a sum of separately measured
+    components, not a single-process end-to-end measurement.
+    """
+    from mmrag.production.pricing import PricingError
+    from mmrag.production.report import render_report
+    from mmrag.production.runner import ArtifactMismatchError, produce
+
+    if not Path(generation_run_path).exists():
+        raise typer.BadParameter(f"no generation run at {generation_run_path}")
+    try:
+        report = produce(generation_run_path, retrieval_path=retrieval_run_path,
+                         judged_path=judged_run_path, pricing_path=pricing_path,
+                         repeats=repeats, measure_prompts=not no_prompt_timing)
+    except (ArtifactMismatchError, PricingError, FileNotFoundError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(code=1) from exc
+    render_report(report, console=console)
+    path = report.save(Path(out_dir) / report.default_filename())
+    console.print(f"[green]saved[/] {path}")
+
+
+@prod_app.command("compare")
+def prod_compare(
+    paths: list[str] = typer.Argument(..., help="Production report JSON files"),
+) -> None:
+    """Side-by-side production metrics for several saved production reports."""
+    from mmrag.production.report import ProductionReport, compare_table
+
+    missing = [p for p in paths if not Path(p).exists()]
+    if missing:
+        raise typer.BadParameter(f"not found: {missing}")
+    console.print(compare_table([ProductionReport.load(p) for p in paths]))
 
 
 if __name__ == "__main__":  # pragma: no cover

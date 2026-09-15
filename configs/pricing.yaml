@@ -1,0 +1,23 @@
+# Token prices used by production evaluation (mmrag prod report).
+#
+# These are the project's CONFIGURED EVALUATION RATES, recorded on the date below.
+# They are not universal or permanent pricing: a vendor or gateway may charge
+# differently, and prices change. Update `as_of` and `source` with any edit;
+# every production report records this file's sha256.
+version: 1
+kind: configured_evaluation_rates
+currency: USD
+unit: per_1m_tokens
+as_of: "2026-09-15"
+source: >-
+  Project evaluation rates already used for dry-run cost projections
+  (mmrag eval generate/judge --price-in/--price-out).
+note: >-
+  Generation and judging were served through an OpenAI-compatible endpoint that
+  reports the model as "openai/gpt-4o-mini"; that name is mapped here as an alias.
+models:
+  gpt-4o-mini:
+    aliases: ["openai/gpt-4o-mini"]
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+    gateway: OpenAI-compatible endpoint (OPENAI_BASE_URL); configured rate, not a quoted gateway price
