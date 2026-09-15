@@ -702,9 +702,19 @@ def query(
         False, "--retrieve-only", help="Show retrieved chunks without calling a model"
     ),
     show_text: bool = typer.Option(False, "--show-text", help="Print each chunk's full text"),
+    pipeline: str | None = typer.Option(
+        None, "--pipeline", help="Generation pipeline: v1 | v2 | v2.1 (default: the config's, v1)"
+    ),
 ) -> None:
     """Ask a question against a built index."""
-    _, method = _load_method(config_name)
+    from mmrag.generation.pipeline import PIPELINES
+
+    if pipeline is not None and pipeline not in PIPELINES:
+        raise typer.BadParameter(f"--pipeline must be one of {', '.join(PIPELINES)}")
+    cfg, method = _load_method(config_name)
+    if pipeline is not None:
+        # The method holds this same config object, so its answerer follows it.
+        cfg.generation.pipeline = pipeline
     ids = list(doc_id) if doc_id else None
 
     if retrieve_only:
@@ -754,6 +764,14 @@ def query(
     )
     if answer.metadata.get("refused"):
         console.print("[yellow]The model reported insufficient evidence.[/]")
+    validation = answer.metadata.get("validation")
+    if validation is not None:
+        issues = ", ".join(validation["issues"]) or "none"
+        console.print(
+            f"[dim]pipeline={answer.metadata.get('pipeline')} validation: "
+            f"{'passed' if validation['passed'] else 'flagged'} (issues: {issues}); "
+            f"answer unchanged[/]"
+        )
 
 
 def _print_retrieval(result: Any, *, show_text: bool = False) -> None:
@@ -1207,16 +1225,24 @@ def eval_generate(
     price_out: float | None = typer.Option(None, "--price-out", help="USD per 1M output tokens"),
     cache_dir: str = typer.Option("data/eval/cache", "--cache-dir"),
     out_dir: str = typer.Option("data/eval/generation", "--out"),
+    pipeline: str | None = typer.Option(
+        None, "--pipeline",
+        help="Generation pipeline: v1 | v2 | v2.1 (default: the retrieval run's config: v1)",
+    ),
 ) -> None:
     """Generate answers from a saved retrieval run.
 
     Uses the exact chunks the retrieval run scored, so no retrieval is re-run for
     the gold queries. Unanswerable queries are retrieved live with the run's own
     configuration. Nothing is called with --dry-run.
+
+    --pipeline v2 or v2.1 generates with that Generation V2 variant from the same
+    retrieval run. Answers are cached under the variant's own prompt version and
+    saved with a "+genv2" or "+genv2.1" label, so no two pipelines overwrite or
+    replay each other.
     """
     from mmrag.config import get_settings
     from mmrag.evaluation.generation_eval import (
-        PROMPT_VERSION,
         DryRunProvider,
         GenerationRun,
         RetrievalRunMismatch,
@@ -1235,8 +1261,11 @@ def eval_generate(
     )
     from mmrag.evaluation.llm_cache import CachingProvider
     from mmrag.evaluation.report import load_run
-    from mmrag.generation.answerer import Answerer
+    from mmrag.generation.pipeline import PIPELINES, build_answerer, prompt_version_for
     from mmrag.generation.providers import ProviderError, get_provider
+
+    if pipeline is not None and pipeline not in PIPELINES:
+        raise typer.BadParameter(f"--pipeline must be one of {', '.join(PIPELINES)}")
 
     started = time.perf_counter()
     run = load_run(retrieval_run_path)
@@ -1249,6 +1278,9 @@ def eval_generate(
         raise typer.Exit(code=1)
 
     config, method = _method_from_run(run)
+    if pipeline is not None:
+        config.generation.pipeline = pipeline
+    chosen = config.generation.pipeline
     top_k = max(config.evaluation.k_values)
     use_metadata = run.overrides.get("use_metadata")
 
@@ -1283,18 +1315,19 @@ def eval_generate(
             console.print(f"[red]{exc}[/]")
             raise typer.Exit(code=1) from exc
 
+    prompt_version = prompt_version_for(chosen)
     provider = CachingProvider(
-        inner, cache_dir, kind="generation", prompt_version=PROMPT_VERSION,
+        inner, cache_dir, kind="generation", prompt_version=prompt_version,
         seed=config.evaluation.llm_seed, enabled=not no_cache, refresh=refresh,
     )
-    answerer = Answerer(config.generation, provider)
+    answerer = build_answerer(config.generation, provider)
 
-    label = tag or run.label()
+    label = tag or (run.label() if chosen == "v1" else f"{run.label()}+gen{chosen}")
     console.print(
         f"Generating for [cyan]{run.label()}[/] — {len(items)} queries "
         f"({sum(i.answerable for i in items)} answerable, "
         f"{sum(not i.answerable for i in items)} unanswerable), "
-        f"model {config.generation.text_model}, provider {name}"
+        f"model {config.generation.text_model}, provider {name}, pipeline {chosen}"
         + (" [yellow](dry run)[/]" if dry_run else "")
     )
 
@@ -1340,8 +1373,8 @@ def eval_generate(
                     "max_output_tokens": config.generation.max_output_tokens,
                     "max_context_tokens": config.generation.max_context_tokens,
                     "refuse_without_evidence": config.generation.refuse_without_evidence,
-                    "seed": config.evaluation.llm_seed, "prompt_version": PROMPT_VERSION,
-                    "top_k": top_k},
+                    "seed": config.evaluation.llm_seed, "prompt_version": prompt_version,
+                    "top_k": top_k, "pipeline": chosen},
         environment=environment(), cache=provider.stats.as_dict(),
         totals=totals(records, provider), records=records, metrics=aggregate(records),
     )

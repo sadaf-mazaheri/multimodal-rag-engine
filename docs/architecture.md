@@ -61,7 +61,7 @@ simultaneously and invalidates prior measurements.
 | Postgres | `stores/postgres.py` | Document/page/element metadata |
 | Rank fusion | `retrieval/fusion.py` | Weighted RRF + contribution diagnostics |
 | Reranking | `retrieval/rerank.py` | Cross-encoder |
-| Generation | `generation/` | `Answerer`, prompt, citation resolution, providers |
+| Generation | `generation/` | Providers, citation resolution, and two pipelines selected by `generation.pipeline`: V1 `Answerer` (default, frozen) and V2 `AnswererV2` — see [Generation pipelines](#generation-pipelines) |
 | CLI | `cli.py` | Same commands for every method, dispatched on `cfg.method` |
 
 ---
@@ -254,6 +254,34 @@ before. The floor is well-behaved between 4 and 8; at 12 the pool outgrows
 **Without a reranker there is no floor.** A quota with no arbiter would promote
 evidence nothing had vouched for, so `rerank_enabled: false` falls back to plain
 cross-modality fusion truncated to `top_k`.
+
+---
+
+## Generation pipelines
+
+Generation is shared by every method, and so is the choice of pipeline: a run
+generates M1, M2 and M3 answers with the same pipeline, never a different one per
+method.
+
+| | V1 (default) | V2 |
+|---|---|---|
+| Module | `generation/answerer.py` | `generation/evidence.py`, `answerer_v2.py`, `validation.py` |
+| Source text | `[n] <title> - page N (<type>)` + chunk text, in retrieval order | Same sources and numbers; shown grouped by page, header `[n] <title> · page N · <modality> · <section>`, breadcrumb removed, captions labelled |
+| Budget | 6,000 tokens, skip what overflows | Identical rule |
+| Model calls | 1 | 1, same model, temperature, seed and output cap |
+| Instructions | concise; refuse if the answer is absent | direct answer with the sources' specifics; describe named tables/figures; partial answers; refuse only when nothing is relevant |
+| Citations | `[n]` → `resolve_citations` | Same function, same provenance |
+| After the call | refusal flag | refusal flag + deterministic `ValidationReport`; the answer is never edited |
+| Prompt version | `1ae772d0aa197ff5`, pinned by a golden test | its own, covering prompts, template and evidence format |
+
+**Isolation.** Evaluation keys every cached answer by prompt version, so V1 and V2
+answers cannot replay each other. A V2 generation run is labelled `+genv2`. Records
+gain optional `pipeline`, `answer_chars`, `answer_sentences` and `validation`
+fields, so artefacts written before V2 still load and score identically. The judge
+is unchanged and sees each pipeline's source text exactly as its generator did.
+
+**What V2 does not change:** retrieval, Method 3, indexes, gold files, the judge
+prompt and schema, and every score computed from a verdict.
 
 ---
 

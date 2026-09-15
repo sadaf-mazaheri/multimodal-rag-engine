@@ -6,7 +6,8 @@
       -> retrievers                 (any set implementing ``Retriever``)
       -> fusion                     (within modality, then weighted RRF across)
       -> modality-floored pool -> cross-encoder rerank
-      -> Answerer                   (context budget, prompt, provider, citations)
+      -> answerer                   (generation.pipeline: v1 Answerer, or v2 evidence pack
+                                     + one call + validation; citations either way)
 
 The engine knows nothing about how its retrievers' indexes were built or where
 they live. Index components (:mod:`mmrag.indexing`) open retrievers; the engine
@@ -28,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from mmrag.config import ExperimentConfig
-from mmrag.generation.answerer import Answerer
+from mmrag.generation.pipeline import build_answerer
 from mmrag.generation.providers.base import LLMProvider
 from mmrag.logging_utils import get_logger
 from mmrag.retrieval.base import Retriever
@@ -156,12 +157,13 @@ class RAGEngine:
     ) -> Answer:
         """Retrieve, then generate a cited answer.
 
-        Every engine configuration answers through the same ``Answerer``, prompt
-        and provider, so answer-quality differences between configurations are
+        Every engine configuration answers through the answerer
+        ``generation.pipeline`` selects, with the same prompt and provider for a
+        given pipeline, so answer-quality differences between configurations are
         attributable to retrieval. No images are attached.
         """
         retrieval = self.retrieve(query, top_k=top_k, doc_ids=doc_ids)
-        answerer = Answerer(self.config.generation, provider)
+        answerer = build_answerer(self.config.generation, provider)
         answer = answerer.answer(query, retrieval.results, method=self.name)
 
         answer.latency_ms.update(retrieval.latency_ms)

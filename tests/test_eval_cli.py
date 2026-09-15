@@ -373,3 +373,76 @@ class TestReportRendering:
 
     def test_run_kind_defaults_to_retrieval(self, env):
         assert run_kind(str(env.retrieval)) == "retrieval"
+
+
+class TestGenerationPipelines:
+    """--pipeline selects V1 or V2 over the same saved retrieval run, in isolation."""
+
+    def test_default_is_v1_with_the_published_prompt_version(self, env):
+        from mmrag.evaluation.generation_eval import PROMPT_VERSION
+
+        generate(env, "--no-unanswerable")
+        run = GenerationRun.load(only(env.out, "*_generation.json"))
+        assert run.label == "method1/rerank"
+        assert run.generation["pipeline"] == "v1"
+        assert run.generation["prompt_version"] == PROMPT_VERSION == "1ae772d0aa197ff5"
+        assert {r.pipeline for r in run.records} == {"v1"}
+
+    def test_v2_is_labelled_versioned_and_never_served_from_the_v1_cache(self, env):
+        from mmrag.generation.answerer_v2 import PROMPT_VERSION_V2
+
+        generate(env, "--no-unanswerable")
+        result = generate(env, "--no-unanswerable", "--pipeline", "v2")
+        assert "cache hits 0" in result.output and "pipeline v2" in result.output
+
+        v2_path = only(env.out, "*+genv2_generation.json")
+        run = GenerationRun.load(v2_path)
+        assert run.label == "method1/rerank+genv2"
+        assert run.generation["pipeline"] == "v2"
+        assert run.generation["prompt_version"] == PROMPT_VERSION_V2
+        assert run.cache["hits"] == 0 and run.cache["misses"] == 2
+        assert {r.pipeline for r in run.records} == {"v2"}
+        assert all(r.validation is not None for r in run.records if r.status == "ok")
+        # Retrieval was not re-run for either pipeline.
+        assert env.method.retrieve_calls == []
+
+    def test_an_unknown_pipeline_is_a_usage_error(self, env):
+        result = runner.invoke(cli.app, [
+            "eval", "generate", "--retrieval-run", str(env.retrieval), "--gold", str(env.gold),
+            "--generation-gold", str(env.generation_gold), "--pipeline", "v3"])
+        assert result.exit_code == 2
+
+    def test_a_v2_run_judges_and_reports_beside_v1(self, env):
+        generate(env, "--no-unanswerable")
+        generate(env, "--no-unanswerable", "--pipeline", "v2")
+        judge(env, only(env.out, "*rerank_generation.json"))
+        judge(env, only(env.out, "*+genv2_generation.json"))
+
+        v1_run = JudgedRun.load(only(env.out, "*rerank_judged.json"))
+        v2_run = JudgedRun.load(only(env.out, "*+genv2_judged.json"))
+        assert v2_run.label == "method1/rerank+genv2" and v2_run.generation["pipeline"] == "v2"
+        assert v1_run.judge["prompt_version"] == v2_run.judge["prompt_version"]
+        assert v2_run.metrics["answerable"]["claims_per_answer"]["n"] == 1
+
+        console = Console(record=True, width=240)
+        render_judged([v1_run, v2_run], console=console)
+        text = console.export_text()
+        assert "Answer shape and validation" in text and "method1/rerank+genv2" in text
+
+
+class TestGenerationV21:
+    def test_v2_1_has_its_own_label_version_and_cache(self, env):
+        from mmrag.generation.answerer_v2 import PROMPT_VERSION_V2, PROMPT_VERSION_V2_1
+
+        generate(env, "--no-unanswerable", "--pipeline", "v2")
+        result = generate(env, "--no-unanswerable", "--pipeline", "v2.1")
+        assert "cache hits 0" in result.output and "pipeline v2.1" in result.output
+
+        v2_run = GenerationRun.load(only(env.out, "*+genv2_generation.json"))
+        v21_run = GenerationRun.load(only(env.out, "*+genv2.1_generation.json"))
+        assert v2_run.label == "method1/rerank+genv2"
+        assert v21_run.label == "method1/rerank+genv2.1"
+        assert v2_run.generation["prompt_version"] == PROMPT_VERSION_V2
+        assert v21_run.generation["prompt_version"] == PROMPT_VERSION_V2_1
+        assert {r.pipeline for r in v21_run.records} == {"v2.1"}
+        assert v21_run.cache["hits"] == 0

@@ -22,7 +22,7 @@ from typing import Any
 
 from mmrag.config import INDEX_DIR, ExperimentConfig
 from mmrag.embeddings.text import TextEmbedder
-from mmrag.generation.answerer import Answerer
+from mmrag.generation.pipeline import build_answerer
 from mmrag.generation.providers.base import LLMProvider
 from mmrag.ingestion.pipeline import read_sidecar, sidecar_path_for
 from mmrag.logging_utils import get_logger
@@ -283,7 +283,7 @@ class Method1Textified:
         quietly turn the baseline into Method 3.
         """
         retrieval = self.retrieve(query, top_k=top_k, doc_ids=doc_ids)
-        answerer = Answerer(self.config.generation, provider)
+        answerer = build_answerer(self.config.generation, provider)
         answer = answerer.answer(query, retrieval.results, method=self.name)
 
         answer.latency_ms.update(retrieval.latency_ms)

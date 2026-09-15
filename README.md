@@ -32,7 +32,8 @@ This project is being built in stages. Current state:
 - [x] **Step 2** — Shared ingestion: PDF → elements with rich metadata and provenance
 - [x] **Step 3** — Method 1: Textified hybrid RAG
 - [x] **Step 4** — Method 2: Modality-aware retrieval + query router
-- [ ] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2) — *implemented and tested on CPU; the GPU page-index build and benchmark run are pending*
+- [x] **Step 5** — Method 3: Hybrid visual RAG (ColQwen2) — page index built on a Colab T4, retrieval and generation evaluated
+- [x] **Step 7** — Generation V2.1: evidence pack, answer contract and deterministic validation beside the frozen V1 — see [Generation V1 and V2](#generation-v1-and-v2)
 - [x] **Step 6** — Evaluation harness: retrieval metrics, then generation scored by an LLM judge
 
 Step 6 was built before Step 5 on purpose: two methods with no numbers were
@@ -604,8 +605,9 @@ sum of each query token's best-matching patch. It can match a query word to an
 axis label, a table cell or a diagram box with no text ever extracted from the
 page — which is what Method 3 measures: the value of seeing the page.
 
-**Status: implemented, not yet run.** The code and its tests run on CPU; the full
-page index needs a GPU machine, and no Method 3 results exist yet.
+**Status: built and evaluated.** The page index was built on a Colab Tesla T4 (951
+pages); retrieval runs on CPU from the cached query embeddings. Results are in
+[Retrieval results](#retrieval-results) and [Generation results](#generation-results).
 
 ### How it stays a controlled comparison
 
@@ -765,13 +767,14 @@ an explicitly phrased question hands the router its answer.
 
 ### Retrieval results
 
-Both methods rerank with the same cross-encoder. Macro-averaged over 42 queries:
+All methods rerank with the same cross-encoder. Macro-averaged over 42 queries:
 
 | run | Recall@1 | Recall@10 | MRR | nDCG@10 |
 |---|---:|---:|---:|---:|
 | Method 1 | 0.405 | 0.881 | 0.555 | 0.633 |
 | **Method 2** | **0.405** | **0.929** | **0.571** | **0.656** |
 | Method 2, `--no-metadata` | 0.405 | 0.929 | 0.569 | 0.655 |
+| Method 3 | 0.405 | **0.952** | 0.563 | 0.655 |
 
 Recall@10 by where the answer lives:
 
@@ -780,6 +783,7 @@ Recall@10 by where the answer lives:
 | Method 1 | 1.000 | 1.000 | 0.667 |
 | **Method 2** | 1.000 | 1.000 | **0.800** |
 | Method 2, `--no-metadata` | 1.000 | 1.000 | 0.800 |
+| Method 3 | 0.933 | 1.000 | **0.933** |
 
 Latency per query, end to end:
 
@@ -787,6 +791,7 @@ Latency per query, end to end:
 |---|---:|---:|
 | Method 1 | 18,368 ms | 24,788 ms |
 | Method 2 | 17,887 ms | 18,539 ms |
+| Method 3 | 18,130 ms | 19,239 ms |
 
 **Method 2 leads on Recall@10, MRR and nDCG@10. Recall@1 is tied.** The whole
 difference is on figures — text and table are both saturated — which is where the
@@ -798,6 +803,16 @@ not to establish significance: the figure slice is 15 queries, so the 0.667 →
 only in the third decimal place, which is the point of the resolver fix — it was
 worth +0.167 Recall@10 as an ablation before the fix and costs nothing after.
 Latency is dominated by the CPU cross-encoder, not by either method's retrieval.
+
+**Method 3 has the highest Recall@10 (0.952) but not the best ranking.** It gained
+two figure queries (q021, q037) and lost one text query (q002) against Method 2 — a
+net of one query. All three changes sit at the top-10 boundary with identical
+cross-encoder scores in both methods; what changed is which chunks reached the
+25-candidate rerank pool. On q002, chunks from pages ColQwen2 ranked highly took
+extra fusion votes and pushed the gold chunk out of the pool — the cost of spending
+the candidate budget in chunks that [Page → chunk expansion](#page--chunk-expansion-and-its-known-costs)
+describes. Visual retrieval adds about 440 ms per query (the page scoring itself
+about 205 ms).
 
 **These are not the first numbers this harness produced.** The first run had
 Method 1 ahead, 0.857 to 0.595. Between that run and this one, three things were
@@ -860,10 +875,12 @@ every call goes through a content-addressed cache, so re-judging is free.
 
 ### Generation results
 
-The three authoritative retrieval runs, each generated and judged over 42
-answerable and 8 unanswerable questions. All 150 answers were generated and
+The four authoritative retrieval runs, each generated and judged over 42
+answerable and 8 unanswerable questions. All 200 answers were generated and
 judged with **zero generation errors, zero judge errors and zero repaired
-verdicts**.
+verdicts**. These are **Generation V1** results; see
+[Generation V1 and V2](#generation-v1-and-v2) for V2.1 and for the drift control
+that showed these V1 numbers move by about ±3 questions when simply re-run.
 
 From retrieval to answer, over the 42 answerable questions. Rates are quoted as
 recorded in the judged run files, to four decimals:
@@ -873,6 +890,7 @@ recorded in the judged run files, to four decimals:
 | Method 1 | 37/42 (0.8810) | 17/37 (0.4595) | 17/42 (0.4048) |
 | Method 2 | 39/42 (0.9286) | 19/39 (0.4872) | 19/42 (0.4524) |
 | **Method 2, `--no-metadata`** | 39/42 (0.9286) | **22/39 (0.5641)** | **22/42 (0.5238)** |
+| Method 3 | 40/42 (0.9524) | 20/40 (0.5000) | 20/42 (0.4762) |
 
 "Gold evidence in prompt" equals Recall@10 from the retrieval results: no gold
 evidence was lost to the context budget in any run. No answer was judged
@@ -883,6 +901,7 @@ grounded correct without its gold evidence in the prompt.
 | Method 1 | 0.6282 | 0.5905 | 17 / 15 / 7 / 3 |
 | Method 2 | 0.6795 | 0.6341 | 19 / 15 / 5 / 3 |
 | **Method 2, `--no-metadata`** | **0.7179** | **0.6778** | 22 / 12 / 5 / 3 |
+| Method 3 | 0.6923 | 0.6460 | 21 / 12 / 6 / 3 |
 
 Grounded correct by where the answer lives:
 
@@ -891,6 +910,7 @@ Grounded correct by where the answer lives:
 | Method 1 | 8 | 7 | 2 |
 | Method 2 | 8 | 7 | 4 |
 | Method 2, `--no-metadata` | 11 | 7 | 4 |
+| Method 3 | 9 | 7 | 4 |
 
 Refusal behaviour:
 
@@ -899,6 +919,7 @@ Refusal behaviour:
 | Method 1 | 8/8 | 3/42 | 3 |
 | Method 2 | 8/8 | 3/42 | 3 |
 | Method 2, `--no-metadata` | 8/8 | 3/42 | 2 |
+| Method 3 | 8/8 | 3/42 | 3 |
 
 "Sufficient context" is the judge's reading of the sources. No run answered from
 context the judge considered insufficient.
@@ -921,11 +942,19 @@ exactly the ones worth checking.
 questions, and slices hold 8 to 15: the whole spread between the best and worst
 run is five questions end to end.
 
+**Method 3's better retrieval did not produce better V1 answers.** It put gold
+evidence in the prompt for one more question than Method 2 and got the most gold
+figures in front of the model (14/15), yet grounded-correct figure answers stayed
+at 4: the V1 generator reads extracted text only and answered figure questions by
+naming the figure rather than describing it.
+
 ### Limitations
 
 - **Faithfulness is not measured meaningfully.** The judge is the same model as
   the generator, and it found no unsupported claim in any of the 117 non-refused
-  answerable answers — faithfulness 1.00 and hallucination 0 in all three runs.
+  answerable answers of Methods 1 and 2 — faithfulness 1.00 and hallucination 0.
+  Method 3's two flagged answers (q020, q040) contain claims the sources do state;
+  both look like judge false positives.
   That is self-judge leniency, not evidence of perfect grounding, and those two
   columns are left out above. Every absolute score here is directional; the
   comparison between runs is the sturdier signal, since all arms share one
@@ -949,6 +978,159 @@ for each stage. Another 84 were served from the cache, since the Method 2 arms
 retrieve identically for most questions. At $0.15 / $0.60 per million
 input / output tokens, the recorded usage of the calls actually made comes to
 about **$0.14** in total: roughly $0.06 generating and $0.08 judging.
+
+---
+
+## Generation V1 and V2
+
+Every result in [Generation results](#generation-results) is **Generation V1**. Those
+runs showed that generation, not retrieval, had become the bottleneck, so further
+pipelines sit beside V1 rather than replacing it. V1 is still the default, and its
+prompt, prompt version (`1ae772d0aa197ff5`), cache keys and artefacts are unchanged;
+`tests/test_generation_v1_golden.py` fails if any of them move.
+
+```
+V1     retrieved chunks → prompt ([n] title - page N (type), chunk text) → 1 LLM call → citations
+V2.x   retrieved chunks → EvidencePack → 1 LLM call → citations → AnswerValidator → answer + report
+```
+
+### What V2 was built to fix
+
+An audit of the V1 judged runs found two dominant failures, neither of them retrieval:
+
+- **Answers that stop at identification.** "Table 3 reports the BLEU scores [6]" is
+  a correct sentence and a partial answer: the missing fact was on the page it
+  cites. In every arm, most failed answers had *all* their missing facts in the
+  sources the model was given. Partial answers had a median of about 19 output
+  tokens, against 56–84 for correct ones. V1's instruction to "be concise" and not to
+  "describe the sources" works against questions about tables and figures.
+- **All-or-nothing refusal.** Questions whose sources held part of the answer were
+  refused outright, because V1 has no way to answer partially.
+
+### The pipeline
+
+| stage | module | what it does | model call |
+|---|---|---|---|
+| EvidencePack | `generation/evidence.py` | Admits sources in retrieval order under V1's 6,000-token budget and tail-drop rule, so source numbers and citation provenance are V1's. Shows them grouped by document page, one header per source — `[n] <title> · page N · <modality> · <section>` — with the chunking breadcrumb removed and table/figure captions labelled. | none |
+| AnswererV2 | `generation/answerer_v2.py` | One call with V1's model, temperature, seed and output cap. Answer directly; give the values, units, conditions and scope the sources state; for "which table/figure/section" questions, name it and say what it shows; answer the supported part of a partially covered question; cite every factual sentence; no prior knowledge; exact numbers and names; usually 2–6 sentences. Plain text with `[n]` markers, resolved by V1's own `resolve_citations`. | 1 |
+| AnswerValidator | `generation/validation.py` | Sentence-level citation coverage, unresolved citations, whether each number or identifier appears in a source the sentence cites, and mixed refusal. Returns a report; never edits the answer, never retries. | none |
+
+No extra model calls, no synthesis step, no judge in the loop. Across all four arms
+V2 admitted exactly V1's sources for all 200 prompts, with nothing dropped for budget.
+
+### V2.0 → V2.1
+
+The first V2 prompt (**V2.0**, `55aea920ebb01b97`) was generated for all four arms
+and inspected before judging. It had two defects, and it was not judged:
+
+- **Wrong-entity answers.** Its rule to refuse "only if no source contains
+  information relevant to the question" let the model treat a similar entity as
+  partial evidence. u003 asks about the RP2350, which the corpus never mentions;
+  V1 refused, but V2.0 answered from the RP2040 datasheet in every arm, so
+  unanswerable refusals fell to 7/8.
+- **Paragraph-level citations.** 88–90% of answers had at least one uncited
+  factual sentence; mean sentence citation coverage was 0.56–0.61.
+
+**V2.1** (`c9830e3efb5505f1`) changes only the prompt. It limits answers, and
+partial answers, to evidence about the subject the question names, refuses when the
+sources describe a different entity, version or year, and says that each factual
+sentence needs its own citation. The rules are generic — no product or query is
+named. V2.0's prompt and artefacts are kept unchanged as a record.
+
+### Results
+
+V2.1 was generated from the same four frozen retrieval runs and judged with the
+unchanged V1 judge protocol. All 400 generation and judge records completed with no
+errors and no repaired verdicts.
+
+**V1 re-run as a drift control.** Before comparing, V1 was regenerated and re-judged
+the same day for Methods 1, 2 and 3 with the cache bypassed and byte-identical
+prompts. Only 32–33 of 50 answers came back word for word: OpenAI's backend for
+`gpt-4o-mini` had changed (system fingerprints `fp_d48d865f86` → `fp_b5bcb8c07e`),
+and seed 42 does not pin output across backends. Grounded correctness moved from 17
+→ 15, 19 → 22 and 20 → 20 questions, with 5–6 per-query flips per arm — 1–2 of them
+on answers that had not changed at all, i.e. judge variance alone. **Treat about ±3
+questions out of 42 as run-to-run noise.** The V2.1 comparison below is therefore
+against the same-day V1 runs, not the 13 September ones.
+
+Over the 42 answerable questions:
+
+| | Method 1: V1 today → V2.1 | Method 2: V1 today → V2.1 | Method 3: V1 today → V2.1 |
+|---|---|---|---|
+| Gold evidence in prompt | 37/42 → 37/42 | 39/42 → 39/42 | 40/42 → 40/42 |
+| Grounded correct, given evidence | 14/37 → **25/37** | 22/39 → 23/39 | 19/40 → **25/40** |
+| **Grounded correct, end to end** | 0.3571 → **0.6190** | 0.5238 → 0.5714 | 0.4762 → **0.6190** |
+| Correctness | 0.6154 → 0.7439 | 0.7179 → 0.7195 | 0.6625 → 0.7500 |
+| Completeness | 0.5786 → 0.7520 | 0.6778 → 0.7274 | 0.6302 → 0.7829 |
+| Correct / partial / incorrect / refused | 17/14/8/3 → 27/7/7/1 | 22/12/5/3 → 24/11/6/1 | 20/13/7/2 → 26/11/5/0 |
+| Refused despite sufficient context | 3 → 1 | 3 → 1 | 2 → 0 |
+| Grounded correct: text / table / figure | 8/4/3 → 11/10/5 | 11/6/5 → 9/8/7 | 8/6/6 → 9/9/8 |
+| Answers with an unsupported claim | 2/39 → 1/41 | 0/39 → 0/41 | 0/40 → 0/42 |
+| Uncited-claim rate | 0.0075 → 0.0374 | 0.0051 → 0.0577 | 0.0154 → 0.0556 |
+| Unanswerable refused | 8/8 → 8/8 | 8/8 → 8/8 | 8/8 → 8/8 |
+
+Method 2 without the metadata resolver has no same-day V1 control. Under V2.1 it
+reached 25/42 grounded correct (0.5952), correctness 0.7262, completeness 0.7472,
+0 refusals of answerable questions and 8/8 unanswerable refused.
+
+**What holds up:**
+
+- **Methods 1 and 3 improve beyond the noise.** +11 and +6 grounded-correct
+  answers against same-day V1, with completeness up 0.17 and 0.15. Partial answers
+  became complete ones (Method 1: 14 partial → 7).
+- **Method 2 does not.** Its same-day V1 happened to score well, and V2.1's +2 is
+  within the measured noise.
+- **Refusals behave.** Over-refusals fall to 0–1 in every arm, every unanswerable
+  question is still refused, and no arm answered from context the judge rated
+  insufficient.
+- **Figures improve.** Grounded-correct figure answers rise in every arm, and
+  "which figure shows…" questions — 0 of 9 in V1's recorded runs, 1 for Method 3 —
+  reach 2–5 of 9.
+- **The method ranking changes.** On same-day V1, Method 2 leads (22 vs 20 and 15).
+  Under V2.1, Methods 1 and 3 tie at 26 and Method 2 has 24. A weaker generator was
+  hiding how usable Method 1's evidence already was.
+
+**Caveats — read these before quoting any number above:**
+
+- **The citation fix only partly worked.** V2.1's uncited-claim rate is 3.6–11×
+  same-day V1's: answers make about four claims each and still cite per paragraph.
+  Sentence citation coverage rose only from 0.56–0.61 (V2.0) to 0.63–0.65, below the
+  0.75 the same validator measures on V1's Method 2 answers. Grounded correctness does not penalise an uncited but supported claim, so
+  the headline numbers do not show this cost.
+- **Per-query churn is large.** Against the recorded V1 runs, V2.1 gained 10–11
+  grounded-correct answers per arm and lost 2–7; q030 and q039 were lost in three or
+  four arms, usually by dropping one required fact from a longer answer.
+- **The design saw the test set.** V2's rules came from V1's failures on these 42
+  questions, and V2.1's fixes from V2.0's outputs on these same 50. Gains here are
+  optimistic until measured on questions the design never saw.
+- **Self-judging.** The judge is the same model as the generator. The comparison
+  between runs is sturdier than any absolute score, and differences of a few
+  questions are directional, not significant.
+- **One leak in every arm.** q036 is judged grounded correct without its gold page in
+  the prompt: the answer is on a page the gold set does not list.
+- **Lexical fact coverage fell from V2.0 to V2.1** by 4–8 facts per arm, while staying
+  well above V1. Asking the model to omit details it cannot cite probably made some
+  answers more conservative.
+
+**Cost.** V2.1 generation and judging for four arms used about 740k generation and
+795k judge input tokens — roughly **$0.28** at $0.15 / $0.60 per million tokens, an
+upper bound since cached records are included.
+
+### Selecting a pipeline
+
+`generation.pipeline: v1 | v2 | v2.1` in a config, or per command:
+
+```bash
+mmrag query "Which table reports BLEU for the model variations?" -c method2 --pipeline v2.1
+mmrag eval generate --retrieval-run data/eval/runs/<run>.json --pipeline v2.1
+```
+
+Generation reuses a saved retrieval run exactly as V1 does, so every method is
+compared under the same generator. Each pipeline is cached under its own prompt
+version, so answers can never replay across pipelines, and runs are labelled
+`<run>+genv2` or `<run>+genv2.1`. The judge, its prompt and every score are
+unchanged; the judged report adds claims per answer, answer length and the
+validator's results beside correctness.
 
 ---
 
@@ -988,7 +1170,12 @@ src/mmrag/
     fusion.py, rerank.py, metadata.py, views.py
     hybrid.py         Method 1's frozen BM25 + dense retriever
   engine.py         RAGEngine: resolve -> retrieve -> fuse -> rerank -> answer
-  generation/       provider interface (openai | local | echo) + answerer
+  generation/       providers (openai | local | echo) and the two answer pipelines
+    answerer.py       Generation V1 (frozen, default)
+    evidence.py       V2: deterministic evidence pack
+    answerer_v2.py    V2: answer contract, one call
+    validation.py     V2: deterministic claim/citation checks
+    pipeline.py       generation.pipeline -> answerer, prompt version
   methods/          benchmark configurations of the system
     base.py           RAGMethod contract, EngineMethod
     registry.py       config.method -> method class

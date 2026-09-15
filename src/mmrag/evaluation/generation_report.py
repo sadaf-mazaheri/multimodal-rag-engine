@@ -149,6 +149,39 @@ def reliability_table(runs: Sequence[JudgedRun]) -> Table:
     return table
 
 
+def pipeline_of(run: JudgedRun) -> str:
+    """A run's generation pipeline; runs from before V2 existed were V1."""
+    return str(run.generation.get("pipeline") or "v1")
+
+
+def answer_shape_table(runs: Sequence[JudgedRun]) -> Table:
+    """Length, claims and the deterministic validator, beside each other.
+
+    Validator columns show "-" for runs generated before the validator existed.
+    """
+    table = Table(title="Answer shape and validation (answered answerable queries)")
+    table.add_column("run", style="cyan", no_wrap=True)
+    for col in ("pipeline", "answer chars", "claims / answer", "sentence\ncitation coverage",
+                "validation\npassed", "ungrounded\nidentifier"):
+        table.add_column(col, justify="right")
+    for run in runs:
+        a = run.metrics["answerable"]
+        answered = [r.generation for r in run.records
+                    if r.answerable and r.scores is not None and not r.scores.refused]
+        reports = [g.validation for g in answered if g.validation is not None]
+        coverage = [v["sentence_citation_coverage"] for v in reports
+                    if v["sentence_citation_coverage"] is not None]
+        table.add_row(
+            run.label, pipeline_of(run), _mean(a.get("answer_chars")),
+            _mean(a.get("claims_per_answer")),
+            f"{sum(coverage) / len(coverage):.2f} (n={len(coverage)})" if coverage else "-",
+            f"{sum(v['passed'] for v in reports)}/{len(reports)}" if reports else "-",
+            f"{sum(bool(v['ungrounded_identifiers']) for v in reports)}/{len(reports)}"
+            if reports else "-",
+        )
+    return table
+
+
 def disagreement_table(runs: Sequence[JudgedRun], limit: int = 20) -> Table:
     table = Table(title="Queries whose outcome differs between runs")
     table.add_column("query", style="cyan", no_wrap=True)
@@ -176,7 +209,7 @@ def render_judged(runs: Sequence[JudgedRun], console: Console | None = None) -> 
         return
     for table in (decomposition_table(runs), quality_table(runs), refusal_table(runs),
                   slice_table(runs, "by_requires"), slice_table(runs, "by_stratum"),
-                  taxonomy_table(runs), reliability_table(runs)):
+                  taxonomy_table(runs), answer_shape_table(runs), reliability_table(runs)):
         console.print()
         console.print(table)
     if len(runs) > 1:

@@ -145,6 +145,18 @@ class TestEngine:
         assert "routing" in answer.metadata and "retrieval" in answer.metadata
         assert answer.metadata["n_images"] == 0
 
+    def test_the_generation_pipeline_follows_the_config(self):
+        built = engine()
+        v1_answer = built.answer("what happened", EchoProvider(), top_k=3)
+        assert "pipeline" not in v1_answer.metadata and "validation" not in v1_answer.metadata
+
+        built.config.generation.pipeline = "v2"
+        v2_answer = built.answer("what happened", EchoProvider(), top_k=3)
+        assert v2_answer.metadata["pipeline"] == "v2"
+        assert set(v2_answer.metadata["validation"]) >= {"passed", "issues",
+                                                          "sentence_citation_coverage"}
+        assert v2_answer.citations and all(c.chunk_id in CHUNKS for c in v2_answer.citations)
+
     def test_reranker_follows_the_config(self):
         assert build_reranker(config()) is None
         assert build_reranker(config(rerank_enabled=True)) is not None

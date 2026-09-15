@@ -62,18 +62,24 @@ from mmrag.generation.answerer import (
     parse_citation_numbers,
     resolve_citations,
 )
+from mmrag.generation.answerer_v2 import PromptBuildV2
+from mmrag.generation.pipeline import prompt_version_for
 from mmrag.generation.providers.base import Message, ProviderError, redact_secrets
+from mmrag.generation.validation import AnswerValidator, answer_sentences
 from mmrag.logging_utils import get_logger
 from mmrag.schemas import Chunk, ChunkType, Modality, ScoredChunk
 
 log = get_logger(__name__)
 
-# Identifies the answering prompt. Changing Answerer's system prompt changes this,
-# which changes every cache key, so a stale cached answer can never be replayed
-# under a new prompt.
+# Identifies the V1 answering prompt. Changing Answerer's system prompt changes
+# this, which changes every cache key, so a stale cached answer can never be
+# replayed under a new prompt. Other pipelines have their own version, from
+# ``prompt_version_for``, so V1 and V2 answers can never share a cache entry.
 PROMPT_VERSION = hashlib.sha256(
     (SYSTEM_PROMPT + "\x00" + SYSTEM_PROMPT_NO_REFUSAL).encode("utf-8")
 ).hexdigest()[:16]
+if prompt_version_for("v1") != PROMPT_VERSION:  # pragma: no cover - a broken invariant
+    raise RuntimeError("V1 prompt version differs between evaluation and the pipeline factory")
 
 _SOURCES_PREFIX = "Sources:\n\n"
 
@@ -145,6 +151,15 @@ class GenerationRecord(BaseModel):
     usage: dict[str, int] = Field(default_factory=dict)
     latency_ms: float | None = None
     cache_hit: bool | None = None
+
+    # Added with Generation V2. Optional, so records written before it still load;
+    # there they are None, and the pipeline was V1.
+    pipeline: str | None = None
+    answer_chars: int | None = None
+    answer_sentences: int | None = None
+    # AnswerValidator's report, computed the same way for every pipeline so the
+    # checks are comparable across them. Deterministic; it never changes an answer.
+    validation: dict[str, Any] | None = None
 
 
 class GenerationRun(BaseModel):
@@ -292,8 +307,10 @@ def sources_block_of(prompt: PromptBuild, query: str) -> str:
     Exact rather than heuristic: the user message is Answerer's template filled
     in, so stripping its known ends recovers the body byte for byte. If the
     template changes, this fails loudly instead of handing the judge the wrong
-    text.
+    text. A V2 prompt carries its source text explicitly, and that is used as is.
     """
+    if isinstance(prompt, PromptBuildV2):
+        return prompt.sources_block
     content = prompt.messages[-1].content
     suffix = f"\n\nQuestion: {query}\n\nAnswer:"
     if not (content.startswith(_SOURCES_PREFIX) and content.endswith(suffix)):
@@ -367,6 +384,7 @@ def generate_one(
 ) -> GenerationRecord:
     sources = prompt.sources
     record = GenerationRecord(
+        pipeline=prompt.pipeline if isinstance(prompt, PromptBuildV2) else "v1",
         query_id=item.query_id,
         query=item.query,
         answerable=item.answerable,
@@ -429,6 +447,11 @@ def generate_one(
     if item.gold is not None and not record.refused:
         record.gold_page_cited = any(c.is_gold for c in record.citations)
     record.fact_lexical = fact_lexical_coverage(item.facts, text) if item.facts else None
+    record.answer_chars = len(text)
+    record.answer_sentences = len(answer_sentences(text))
+    report = AnswerValidator().validate(text, sources).as_dict()
+    report.pop("sentences")
+    record.validation = report
     record.model = completion.model
     record.system_fingerprint = completion.metadata.get("system_fingerprint")
     record.finish_reason = completion.metadata.get("finish_reason")
@@ -527,6 +550,26 @@ def aggregate(records: Sequence[GenerationRecord]) -> dict[str, Any]:
             "p90": percentile(latencies, 0.9),
         },
         "sources_per_prompt": mean(len(r.sources) for r in records),
+        # Added with Generation V2; appended so every key above keeps its meaning.
+        "answer_shape": {
+            "answer_chars": mean(r.answer_chars for r in answered),
+            "answer_sentences": mean(r.answer_sentences for r in answered),
+        },
+        "validation": _validation_summary(answered),
+    }
+
+
+def _validation_summary(records: Sequence[GenerationRecord]) -> dict[str, Any]:
+    """AnswerValidator's checks over answered answerable queries that carry a report."""
+    checked = [r.validation for r in records if r.validation is not None]
+    return {
+        "n": len(checked),
+        "passed": rate(v["passed"] for v in checked),
+        "sentence_citation_coverage": mean(v["sentence_citation_coverage"] for v in checked),
+        "any_uncited_sentence": rate(bool(v["uncited_sentences"]) for v in checked),
+        "any_unresolved_citation": rate(bool(v["unresolved_citations"]) for v in checked),
+        "any_ungrounded_identifier": rate(bool(v["ungrounded_identifiers"]) for v in checked),
+        "mixed_refusal": rate(v["mixed_refusal"] for v in checked),
     }
 
 

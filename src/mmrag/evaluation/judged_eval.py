@@ -324,6 +324,10 @@ def aggregate_judged(items: Sequence[JudgedRecord]) -> dict[str, Any]:
                 "rate": round(agree / checkable, 4) if checkable else None},
             "by_requires": by("requires"),
             "by_stratum": by("stratum"),
+            # Added with Generation V2, to read quality beside length: a longer
+            # answer covers more facts and also makes more claims to get wrong.
+            "claims_per_answer": mean(r.scores.n_claims for r in answered),
+            "answer_chars": mean(len(r.generation.answer or "") for r in answered),
         },
         "unanswerable": {
             "refused": rate(r.scores.refused for r in u_judged),

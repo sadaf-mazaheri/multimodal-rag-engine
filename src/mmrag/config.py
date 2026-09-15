@@ -299,6 +299,11 @@ class GenerationConfig(BaseModel):
     the experiment.
     """
 
+    # How retrieved chunks become an answer: "v1" is the original Answerer and
+    # stays the default; "v2" adds an evidence pack and deterministic validation
+    # around the same single model call; "v2.1" is V2 with the wrong-entity and
+    # sentence-citation prompt fixes. See mmrag.generation.
+    pipeline: Literal["v1", "v2", "v2.1"] = "v1"
     text_model: str = "gpt-4o-mini"
     vision_model: str = "gpt-4o-mini"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
