@@ -310,8 +310,8 @@ fixed seed does not pin output across backends: re-running V1 with byte-identica
 prompts reproduced only 32–33 of 50 answers and moved grounded correctness by up to
 three questions. A pipeline comparison is therefore made against a V1 run generated
 and judged the same day with `--no-cache`, never against an older V1 run. Results
-and caveats are in the README's
-[Generation V1 and V2](../README.md#generation-v1-and-v2).
+and caveats are in the design notes'
+[Generation V1 and V2](design_and_results.md#generation-v1-and-v2).
 
 **What V2.x does not change:** retrieval, Method 3, indexes, gold files, the judge
 prompt and schema, and every score computed from a verdict.

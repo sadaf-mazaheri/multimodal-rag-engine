@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mmrag"
 version = "0.1.0"
-description = "A production-grade benchmark comparing three multimodal RAG architectures on the same document corpus."
+description = "An engineering benchmark comparing three multimodal RAG architectures on the same document corpus."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
