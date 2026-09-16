@@ -1613,5 +1613,136 @@ def prod_compare(
     console.print(compare_table([ProductionReport.load(p) for p in paths]))
 
 
+def _parse_levels(value: str) -> list[int]:
+    try:
+        return [int(v) for v in value.split(",") if v.strip()]
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"--concurrency must be comma-separated integers: {value}") from exc
+
+
+def _parse_replay_runs(entries: list[str] | None) -> dict[str, str]:
+    runs: dict[str, str] = {}
+    for entry in entries or []:
+        name, sep, path = entry.partition("=")
+        if not sep or not name.strip() or not path.strip():
+            raise typer.BadParameter(f"--replay-run must be METHOD=PATH, got {entry!r}")
+        runs[name.strip()] = path.strip()
+    return runs
+
+
+def _preflight_services(methods: list[str]) -> list[str]:
+    """Services the methods' retrieval needs. Probes only; never starts anything."""
+    import httpx
+
+    from mmrag.config import get_settings
+
+    settings = get_settings()
+    problems = []
+    try:
+        httpx.get(f"{settings.qdrant_url}/readyz", timeout=3.0).raise_for_status()
+    except Exception as exc:
+        problems.append(f"Qdrant unreachable at {settings.qdrant_url} ({type(exc).__name__})")
+    if any(m in ("method2", "method3") for m in methods):
+        try:
+            import psycopg
+
+            with psycopg.connect(settings.postgres_dsn, connect_timeout=3):
+                pass
+        except Exception as exc:
+            problems.append(f"Postgres unreachable ({type(exc).__name__}); the metadata "
+                            "resolver would silently fall back and prompts could drift")
+    return problems
+
+
+@prod_app.command("load")
+def prod_load(
+    methods: str = typer.Option("method1,method2,method3", "--methods",
+                                help="Comma-separated: method1,method2,method3"),
+    concurrency: str = typer.Option("1,5,10", "--concurrency", help="Comma-separated levels"),
+    limit: int = typer.Option(20, "--limit", min=1, help="Requests per concurrency level"),
+    warmup: int = typer.Option(2, "--warmup", min=0, help="Sequential warm-up requests"),
+    cooldown_s: float = typer.Option(5.0, "--cooldown-s", min=0.0),
+    sample_interval_s: float = typer.Option(0.5, "--sample-interval-s", min=0.05),
+    mode: str = typer.Option("replay", "--mode", help="replay | live"),
+    replay_run: list[str] | None = typer.Option(
+        None, "--replay-run", help="METHOD=PATH generation run to replay; repeatable"),
+    allow_live_calls: bool = typer.Option(False, "--allow-live-calls",
+                                          help="Required for --mode live: real provider calls"),
+    max_live_requests: int | None = typer.Option(None, "--max-live-requests", min=1),
+    pricing_path: str = typer.Option("configs/pricing.yaml", "--pricing"),
+    skip_preflight: bool = typer.Option(False, "--skip-preflight"),
+    out_dir: str = typer.Option("data/eval/production/load", "--out"),
+) -> None:
+    """Load-test the real serving path at several concurrency levels.
+
+    Measures in-process wall-clock latency around method.answer(...) with a
+    shared method instance and a closed-loop thread pool. Replay mode (default)
+    returns recorded answers after their recorded provider latency and makes no
+    provider calls. Services are probed, never started.
+    """
+    from mmrag.production.load import (
+        LoadConfigError,
+        check_live_allowed,
+        estimate_live_cost,
+        load_source,
+        render_load,
+        requests_per_method,
+        run_load,
+    )
+    from mmrag.production.pricing import PricingError, PricingTable
+
+    names = [m.strip() for m in methods.split(",") if m.strip()]
+    levels = _parse_levels(concurrency)
+    runs = _parse_replay_runs(replay_run)
+    if mode not in ("replay", "live"):
+        raise typer.BadParameter("--mode must be replay or live")
+    from mmrag.production.load import METHODS
+
+    unknown = [n for n in names if n not in METHODS]
+    if not names or unknown:
+        raise typer.BadParameter(f"--methods must be from {', '.join(METHODS)}; got {methods}")
+
+    try:
+        planned = requests_per_method(levels, limit, warmup) * len(names)
+        check_live_allowed(mode, allow_live_calls=allow_live_calls,  # type: ignore[arg-type]
+                           max_live_requests=max_live_requests, planned_requests=planned)
+        if mode == "live":
+            from mmrag.production.load import DEFAULT_REPLAY_RUNS
+
+            merged = {**DEFAULT_REPLAY_RUNS, **runs}
+            sources = [load_source(n, merged[n]) for n in names]
+            projection = estimate_live_cost(sources, levels=levels, limit=limit, warmup=warmup,
+                                            pricing=PricingTable.load(pricing_path))
+            console.print(f"[yellow]live mode: {planned} real provider calls, projected "
+                          f"~${projection['total_usd']} ({projection['kind']}, "
+                          f"as of {projection['pricing_as_of']})[/]")
+    except (LoadConfigError, PricingError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(code=1) from exc
+
+    if not skip_preflight:
+        problems = _preflight_services(names)
+        if problems:
+            for p in problems:
+                console.print(f"[red]{escape(p)}[/]")
+            console.print("[dim]Start the services (docker compose up -d) or pass "
+                          "--skip-preflight.[/]")
+            raise typer.Exit(code=1)
+
+    try:
+        run = run_load(names, mode=mode, replay_runs=runs, levels=levels,  # type: ignore[arg-type]
+                       limit=limit, warmup=warmup, cooldown_s=cooldown_s,
+                       sample_interval_s=sample_interval_s, allow_live_calls=allow_live_calls,
+                       max_live_requests=max_live_requests,
+                       on_event=lambda msg: console.print(f"[dim]{escape(msg)}[/]"))
+    except LoadConfigError as exc:
+        console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(code=1) from exc
+    render_load(run, console=console)
+    path = run.save(Path(out_dir) / run.default_filename())
+    console.print(f"[green]saved[/] {path}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
